@@ -194,12 +194,14 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glDepthFunc(this.properties.closerEqualDepthCompare());
         glColorMask(true,true,true,true);
 
-        // Keep the old stencil values for diagnostics and shader-pack copies,
-        // but do not use them as an occupancy mask for LOD.  A source pixel can
-        // contain a nearer vanilla surface while a LOD water/terrain fragment is
-        // in front of it; the depth comparison above is the correct arbiter.
+        // The setup pass writes stencil 0 only where the vanilla depth texture
+        // contains a real terrain sample; sky/empty pixels retain the clear value
+        // 1. Keep LoD out of the former, while allowing it to fill holes where
+        // Sodium did not produce a vanilla depth sample. This is deliberately
+        // based on the actual depth buffer rather than the conservative section
+        // AABB mask, which could hide valid LoD terrain inside an empty section.
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilFunc(GL_ALWAYS, 1, 0xFF);
+        glStencilFunc(GL_EQUAL, 1, 0xFF);
     }
 
     private static final long SCRATCH = MemoryUtil.nmemAlloc(4*4*4);

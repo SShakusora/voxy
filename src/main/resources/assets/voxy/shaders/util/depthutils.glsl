@@ -51,6 +51,19 @@ float SCREEN2NDC_DEPTH(float val) {
 }
 #endif
 
+// Minecraft 1.20.1's vanilla projection is the conventional OpenGL
+// projection: the depth attachment stores [0, 1], while clip-space Z is
+// [-1, 1]. Voxy's extended projection may use the zero-to-one convention
+// above, so passes that cross the vanilla/Voxy boundary must not reuse the
+// convention-dependent helpers for the vanilla side.
+vec3 SCREEN2NDC_STANDARD(vec3 val) {
+    return vec3(val.xy*2.0f-1.0f, val.z*2.0f-1.0f);
+}
+
+float NDC2SCREEN_DEPTH_STANDARD(float val) {
+    return val*0.5f+0.5f;
+}
+
 
 #else
 #undef UNDEFINE_DEPTH

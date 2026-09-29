@@ -12,11 +12,13 @@ import me.cortex.voxy.client.core.rendering.post.FullscreenBlit;
 import me.cortex.voxy.client.core.util.GPUTiming;
 import net.minecraft.client.Minecraft;
 import org.joml.Matrix4f;
+import org.lwjgl.system.MemoryStack;
 
 import java.util.List;
 import java.util.function.BooleanSupplier;
 
 import static org.lwjgl.opengl.GL11C.GL_BLEND;
+import static org.lwjgl.opengl.GL11C.GL_COLOR;
 import static org.lwjgl.opengl.GL11C.GL_DEPTH_COMPONENT;
 import static org.lwjgl.opengl.GL11C.GL_DEPTH_TEST;
 import static org.lwjgl.opengl.GL11C.GL_NEAREST;
@@ -33,7 +35,11 @@ import static org.lwjgl.opengl.GL14C.glBlendFuncSeparate;
 import static org.lwjgl.opengl.GL20C.glUniform4f;
 import static org.lwjgl.opengl.GL30C.*;
 import static org.lwjgl.opengl.GL43.GL_DEPTH_STENCIL_TEXTURE_MODE;
+import static org.lwjgl.opengl.GL42.GL_FRAMEBUFFER_BARRIER_BIT;
+import static org.lwjgl.opengl.GL42.GL_TEXTURE_FETCH_BARRIER_BIT;
+import static org.lwjgl.opengl.GL42.glMemoryBarrier;
 import static org.lwjgl.opengl.GL45C.glBindTextureUnit;
+import static org.lwjgl.opengl.GL45C.glClearNamedFramebufferfv;
 import static org.lwjgl.opengl.GL45C.glTextureParameterf;
 
 public class NormalRenderPipeline extends AbstractRenderPipeline {
@@ -79,6 +85,16 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
             glTextureParameterf(this.fb.getDepthTex().id, GL_DEPTH_STENCIL_TEXTURE_MODE, GL_DEPTH_COMPONENT);
         }
 
+        // colourTex is kept between frames to avoid reallocating the FBO. It
+        // is a coverage buffer, not a history buffer, so every frame must start
+        // transparent; otherwise vanilla-only pixels can composite the previous
+        // frame's LoD colour and produce the long streaks seen at the transition.
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            var clearColour = stack.mallocFloat(4);
+            clearColour.put(0.0f).put(0.0f).put(0.0f).put(0.0f).flip();
+            glClearNamedFramebufferfv(this.fb.framebuffer.id, GL_COLOR, 0, clearColour);
+        }
+
         this.initDepthStencil(viewport, sourceFB, this.fb.framebuffer.id, viewport.width, viewport.height, viewport.width, viewport.height);
 
         return this.fb.getDepthTex().id;
@@ -88,6 +104,11 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
     protected void postOpaquePreTranslucent(Viewport<?> viewport, int sourceFrameBuffer) {
         GPUTiming.INSTANCE.marker("ao");
         this.ssao.computeSSAO(viewport, this.colourSSAOTex, this.colourTex, this.fb.getDepthTex(), sourceFrameBuffer);
+        // SSAO writes colourSSAOTex through an image binding.  The next pass
+        // either blends into it as a framebuffer or samples it in finalBlit;
+        // make both consumers observe the completed compute writes instead of
+        // a previous frame's cache lines.
+        glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_FRAMEBUFFER_BARRIER_BIT);
         glBindFramebuffer(GL_FRAMEBUFFER, this.fbSSAO.id);
     }
 

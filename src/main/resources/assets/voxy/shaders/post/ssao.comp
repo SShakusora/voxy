@@ -23,6 +23,11 @@ vec3 rev3d(mat4 matrix, vec3 clip) {
     return view.xyz/view.w;
 }
 
+vec3 rev3dSource(mat4 matrix, vec3 clip) {
+    vec4 view = matrix * vec4(SCREEN2NDC_STANDARD(clip),1.0);
+    return view.xyz/view.w;
+}
+
 ivec2 size;
 vec2 scale;
 
@@ -194,14 +199,15 @@ float computeAO(vec3 uvDepth, vec3 worldNorm)
             continue;
         }
         vec3 offset_view;// = rev3d(invProj, vec3(sample_uv, depth));
-        if (depth == NEAR) {//Assume vanilla
-            depth = texture(sourceDepthTex, sample_uv).x;
-            if (depth == FAR) {
+        vec4 sampleColour = texture(colourTex, sample_uv);
+        if (sampleColour.a == 0.0f) {//No Voxy colour: use the vanilla depth.
+            float sourceDepth = texture(sourceDepthTex, sample_uv).x;
+            if (sourceDepth == FAR) {
                 continue;
             }
-            offset_view = rev3d(sourceInvProj, vec3(sample_uv, depth));
+            offset_view = rev3dSource(sourceInvProj, vec3(sample_uv, sourceDepth));
         } else {
-            uint meta = uint(255.0f*texture(colourTex, sample_uv).w);
+            uint meta = uint(255.0f*sampleColour.w);
             if ((meta&(1<<6))==0) {
                 continue;
             }
@@ -253,24 +259,24 @@ void main() {
     vec2 point = vec2(vec2(gl_GlobalInvocationID.xy)+0.5f)*scale;//Offset to the center of the textile
     float depth = texture(depthTex, point).r;
     vec4 ocolour = vec4(0);
-    if (depth!=NEAR && depth!=FAR) {
-        vec4 colour = texture(colourTex, point);
-        if (colour == vec4(0.0f, 0.0f, 0.0f, 0.0f)) {
-            ocolour = vec4(1.0f, 0.0f, 0.0f, 1.0f);
-        } else {
-            uint metadata = uint(colour.w*255.0f);
-            uint face = metadata&7u;
-            uint lod = (metadata>>3)&7u;
-            bool hasAO = (metadata&(1<<6))!=0;
+    vec4 colour = texture(colourTex, point);
+    // The private colour target is transparent for pixels occupied by vanilla
+    // terrain (or by the sky). Do not manufacture a debug colour for those
+    // pixels: doing so turns a valid vanilla depth sample into stale/garbled
+    // LoD colour during the final composite.
+    if (depth!=FAR && colour.a > 0.0f) {
+        uint metadata = uint(colour.w*255.0f);
+        uint face = metadata&7u;
+        uint lod = (metadata>>3)&7u;
+        bool hasAO = (metadata&(1<<6))!=0;
 
 
-            ocolour = colour;
-            ocolour.w = 1.0f;
+        ocolour = colour;
+        ocolour.w = 1.0f;
 
-            if (hasAO) {
-                vec3 worldNormal = face2norm(face);
-                ocolour.rgb *= computeAO(vec3(point, depth), worldNormal);
-            }
+        if (hasAO) {
+            vec3 worldNormal = face2norm(face);
+            ocolour.rgb *= computeAO(vec3(point, depth), worldNormal);
         }
     }
     imageStore(colourTexOut, ivec2(gl_GlobalInvocationID.xy), ocolour);

@@ -18,7 +18,10 @@ void main() {
     // Reconstruct the vanilla depth sample in view space, then project it with
     // Voxy's extended-far-plane matrix.  This preserves the actual occluder
     // position instead of treating every non-sky pixel as the near plane.
-    vec4 viewPosition = invSourceMVP * vec4(SCREEN2NDC(vec3(sourceUV, sourceDepth)), 1.0);
+    // The source is Minecraft's vanilla framebuffer, whose projection uses
+    // the conventional OpenGL clip-space Z range. The target is Voxy's
+    // extended projection and uses the convention selected by RenderProperties.
+    vec4 viewPosition = invSourceMVP * vec4(SCREEN2NDC_STANDARD(vec3(sourceUV, sourceDepth)), 1.0);
     viewPosition /= viewPosition.w;
     vec4 targetPosition = targetMVP * viewPosition;
     float targetDepth = targetPosition.z / targetPosition.w;
