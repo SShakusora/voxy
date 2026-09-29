@@ -24,6 +24,8 @@
 
   "voxy.config.general.renderDistance": "Render distance",
   "voxy.config.general.renderDistance.tooltip": "Render distance of voxy in chunks",
+  "voxy.config.general.lodEdgeOverlap": "LoD edge overlap",
+  "voxy.config.general.lodEdgeOverlap.tooltip": "Pulls the vanilla depth mask inward by this many blocks so LoD overlaps the outer terrain edge. The vanilla depth buffer hides the overlap. 8 is recommended.",
 
   "voxy.config.general.environmental_fog": "Enable environmental fog",
   "voxy.config.general.environmental_fog.tooltip": "Enables or disables voxy rendering environmental fog",

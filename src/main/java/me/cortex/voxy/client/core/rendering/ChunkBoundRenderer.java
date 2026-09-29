@@ -4,6 +4,7 @@ import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import me.cortex.voxy.client.core.AbstractRenderPipeline;
 import me.cortex.voxy.client.core.RenderProperties;
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.gl.GlBuffer;
 import me.cortex.voxy.client.core.gl.GlVertexArray;
 import me.cortex.voxy.client.core.gl.shader.AutoBindingShader;
@@ -14,6 +15,8 @@ import me.cortex.voxy.client.core.rendering.util.SharedIndexBuffer;
 import me.cortex.voxy.client.core.rendering.util.UploadStream;
 import me.cortex.voxy.common.Logger;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.SectionPos;
+import net.caffeinemc.mods.sodium.client.render.chunk.lists.ChunkRenderListIterable;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.joml.Vector3i;
@@ -42,6 +45,8 @@ public class ChunkBoundRenderer {
 
     private final LongOpenHashSet addQueue = new LongOpenHashSet();
     private final LongOpenHashSet remQueue = new LongOpenHashSet();
+    private final LongOpenHashSet visibleSections = new LongOpenHashSet();
+    private boolean depthBufferNeedsClear;
 
     private final AbstractRenderPipeline pipeline;
     public ChunkBoundRenderer(AbstractRenderPipeline pipeline) {
@@ -79,6 +84,60 @@ public class ChunkBoundRenderer {
         }
     }
 
+    /**
+     * Synchronizes the bounding geometry with Sodium's render list for this frame.
+     *
+     * <p>The upload callbacks track every non-empty section known to Sodium. That is
+     * deliberately broader than the set Sodium actually draws after distance, fog,
+     * frustum and occlusion culling. Using the broader set for Voxy's depth bounds
+     * leaves holes wherever an invisible section AABB suppresses LoD geometry without
+     * Sodium supplying the corresponding near geometry.</p>
+     */
+    public void updateVisibleSections(ChunkRenderListIterable renderLists) {
+        boolean hadSections = !this.chunk2idx.isEmpty();
+        this.visibleSections.clear();
+
+        var lists = renderLists.iterator();
+        while (lists.hasNext()) {
+            var list = lists.next();
+            var sections = list.sectionsWithGeometryIterator(false);
+            if (sections == null) {
+                continue;
+            }
+
+            var region = list.getRegion();
+            while (sections.hasNext()) {
+                var section = region.getSection(sections.nextByteAsInt());
+                if (section != null) {
+                    this.visibleSections.add(SectionPos.asLong(
+                            section.getChunkX(), section.getChunkY(), section.getChunkZ()));
+                }
+            }
+        }
+
+        // Upload callbacks may have queued changes for the broader built-section set.
+        // The visible list is authoritative for this renderer frame.
+        this.addQueue.clear();
+        this.remQueue.clear();
+
+        int index = 0;
+        while (index < this.chunk2idx.size()) {
+            long pos = this.idx2chunk[index];
+            if (this.visibleSections.remove(pos)) {
+                index++;
+            } else {
+                this._remPos(pos);
+            }
+        }
+
+        this.visibleSections.forEach(this::_addPos);
+        this.visibleSections.clear();
+
+        if (hadSections && this.chunk2idx.isEmpty()) {
+            this.depthBufferNeedsClear = true;
+        }
+    }
+
     //Bind and render, changing as little gl state as possible so that the caller may configure how it wants to render
     public void render(Viewport<?> viewport) {
         if (!this.remQueue.isEmpty()) {
@@ -96,17 +155,31 @@ public class ChunkBoundRenderer {
             this.addQueue.clear();
             UploadStream.INSTANCE.commit();
         }
-        if (this.chunk2idx.isEmpty()) return;
+        if (this.chunk2idx.isEmpty()) {
+            if (this.depthBufferNeedsClear) {
+                viewport.depthBoundingBuffer.clear(this.properties.inverseClearDepth());
+                this.depthBufferNeedsClear = false;
+            }
+            return;
+        }
         //? } else {
         if (this.chunk2idx.isEmpty() && this.addQueue.isEmpty()) return;
         //? }
 
         viewport.depthBoundingBuffer.clear(this.properties.inverseClearDepth());
+        this.depthBufferNeedsClear = false;
 
         long ptr = UploadStream.INSTANCE.upload(this.uniformBuffer, 0, 128);
         long matPtr = ptr; ptr += 4*4*4;
 
-        final float renderDistance = Minecraft.getInstance().options.getEffectiveRenderDistance()*16;//In blocks
+        // Keep a small world-space overlap between vanilla terrain and LoD terrain.
+        // The vanilla depth/stencil buffer hides the overlap wherever real terrain
+        // exists, while pulling this conservative full-section mask inward prevents
+        // empty parts of the outermost section boxes from cutting a vertical hole
+        // into the LoD surface.
+        final int overlap = Math.max(0, Math.min(256, VoxyConfig.CONFIG.lodEdgeOverlapBlocks));
+        final float renderDistance = Math.max(16.0f,
+                Minecraft.getInstance().options.getEffectiveRenderDistance()*16.0f - overlap);//In blocks
 
         {//This is recomputed to be in chunk section space not worldsection
 
@@ -242,6 +315,10 @@ public class ChunkBoundRenderer {
 
     public void reset() {
         this.chunk2idx.clear();
+        this.addQueue.clear();
+        this.remQueue.clear();
+        this.visibleSections.clear();
+        this.depthBufferNeedsClear = true;
     }
 
     public void free() {

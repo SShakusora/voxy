@@ -35,7 +35,7 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
         CallbackInfo ci) {
         if (VoxyClient.disableSodiumChunkRender()) {
             super.begin(renderPass);
-            this.doRender(matrices, renderPass, camera);
+            this.doRender(matrices, renderLists, renderPass, camera);
             super.end(renderPass);
             ci.cancel();
         }
@@ -46,14 +46,15 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
         //? if 1.21.1
         boolean indexedRenderingEnabled,
         CallbackInfo ci) {
-        this.doRender(matrices, renderPass, camera);
+        this.doRender(matrices, renderLists, renderPass, camera);
     }
 
     @Unique
-    private void doRender(ChunkRenderMatrices matrices, TerrainRenderPass renderPass, CameraTransform camera) {
+    private void doRender(ChunkRenderMatrices matrices, ChunkRenderListIterable renderLists, TerrainRenderPass renderPass, CameraTransform camera) {
         if (renderPass == DefaultTerrainRenderPasses.CUTOUT) {
             var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).voxy$getRenderSystem();
             if (renderer != null) {
+                renderer.chunkBoundRenderer.updateVisibleSections(renderLists);
                 Viewport<?> viewport = null;
                 if (IrisUtil.irisShaderPackEnabled()) {
                     viewport = renderer.getViewport();

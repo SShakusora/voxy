@@ -48,6 +48,8 @@ public class MixinSodiumWorldRendererVS {
         if (renderLayer == RenderType.solid()) {
             var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).voxy$getRenderSystem();
             if (renderer != null) {
+                var sectionManager = ((AccessorSodiumWorldRenderer)(Object)this).getRenderSectionManager();
+                renderer.chunkBoundRenderer.updateVisibleSections(sectionManager.getRenderLists());
                 Viewport<?> viewport = null;
                 if (IrisUtil.irisShaderPackEnabled()) {
                     viewport = renderer.getViewport();

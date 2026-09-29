@@ -151,6 +151,14 @@ public abstract class VoxyConfigScreenPages {
                         .setImpact(OptionImpact.LOW)
                         .setFlags(OptionFlag.REQUIRES_RENDERER_RELOAD)
                         .build()
+                ).add(OptionImpl.createBuilder(int.class, storage)
+                        .setName(Component.translatable("voxy.config.general.lodEdgeOverlap"))
+                        .setTooltip(Component.translatable("voxy.config.general.lodEdgeOverlap.tooltip"))
+                        .setControl(opt -> new SliderControl(opt, 0, 256, 1, v -> Component.literal(Integer.toString(v))))
+                        .setBinding((s, v) -> s.lodEdgeOverlapBlocks = Math.max(0, Math.min(256, v)),
+                                s -> Math.max(0, Math.min(256, s.lodEdgeOverlapBlocks)))
+                        .setImpact(OptionImpact.LOW)
+                        .build()
                 ).build()
         );
 

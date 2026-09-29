@@ -33,6 +33,11 @@ public class VoxyConfig
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
     public float sectionRenderDistance = 16;
+    /**
+     * Number of blocks by which the vanilla section depth mask is pulled inward.
+     * The real vanilla depth/stencil buffer still hides the overlapping LoD.
+     */
+    public int lodEdgeOverlapBlocks = 8;
     public int serviceThreads = (int) Math.max(CpuLayout.getCoreCount()/1.5, 1);
     public float subDivisionSize = 64;
     public int skyFogDistance = 96;
