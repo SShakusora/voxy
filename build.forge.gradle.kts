@@ -12,7 +12,7 @@ extra["sourceJavaDir"] = "src/forge/java"
 
 plugins {
     id("java")
-    id("net.neoforged.moddev.legacyforge") version "2.0.141"
+    id("net.neoforged.moddev.legacyforge")
     id("me.modmuss50.mod-publish-plugin") version "2.0.0-beta.1"
     // Provide fletching-table conversion (accesswidener -> accesstransformer)
     id("dev.kikugie.fletching-table.lexforge") version "0.1.0-alpha.23"

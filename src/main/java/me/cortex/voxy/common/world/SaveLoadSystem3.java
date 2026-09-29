@@ -8,7 +8,14 @@ import me.cortex.voxy.common.world.other.Mapper;
 import org.lwjgl.system.MemoryUtil;
 
 public class SaveLoadSystem3 {
-    public static final int STORAGE_VERSION = 0;
+    /**
+     * The block mapping now includes block-entity supplied visual materials
+     * (for example Create Copycats).  Bump the section format so sections
+     * written with the old visual mapping cannot survive a reload and render
+     * stale Copycat geometry.  Sections with an older version are discarded by
+     * SectionSerializationStorage and will be rebuilt from the live chunks.
+     */
+    public static final int STORAGE_VERSION = 1;
 
     private record SerializationCache(Long2ShortOpenHashMap lutMapCache, MemoryBuffer memoryBuffer) {
         public SerializationCache() {
@@ -65,11 +72,10 @@ public class SaveLoadSystem3 {
             throw new IllegalStateException();
         }
 
-        //TODO: note! can actually have the first (last?) byte of metadata be the storage version!
         long metadata = 0;
         metadata |= Integer.toUnsignedLong(LUT.size());//Bottom 2 bytes
         metadata |= Byte.toUnsignedLong(section.getNonEmptyChildren())<<16;//Next byte
-        //5 bytes free
+        metadata |= Integer.toUnsignedLong(STORAGE_VERSION & 0xFF)<<24;
 
         MemoryUtil.memPutLong(metadataPtr, metadata);
         //TODO: do hash
@@ -88,6 +94,12 @@ public class SaveLoadSystem3 {
         }
 
         final long metadata = MemoryUtil.memGetLong(ptr); ptr += 8;
+        int storageVersion = (int) ((metadata >>> 24) & 0xFF);
+        if (storageVersion != STORAGE_VERSION) {
+            Logger.warn("Discarding section with incompatible storage version " + storageVersion
+                    + ", expected " + STORAGE_VERSION);
+            return false;
+        }
         section.nonEmptyChildren = (byte) ((metadata>>>16)&0xFF);
         final long lutBasePtr = ptr + WorldSection.SECTION_VOLUME * 2;
 

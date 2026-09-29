@@ -97,6 +97,26 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
     }
 
+    /**
+     * Makes the opaque Voxy depth available to Minecraft's dynamic geometry pass.
+     *
+     * Shader-pack pipelines may intentionally keep the LOD depth in a private
+     * framebuffer.  Such a pipeline can override this hook when the main depth
+     * attachment needs to be updated before entities and block entities render.
+     */
+    public void prepareDepthForDynamicGeometry(Viewport<?> viewport, int outputFramebuffer, int outputWidth, int outputHeight) {
+    }
+
+    /**
+     * Whether the private pipeline depth already contains vanilla geometry at
+     * its correct projected depth.  Older shader-pack paths used a stencil-only
+     * near-plane sentinel and needed a post-opaque depth hack; the normal path
+     * now reconstructs the vanilla depth instead.
+     */
+    protected boolean usesDepthAwareVanillaDepth() {
+        return true;
+    }
+
     public void runPipeline(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
         int depthTexture = this.setup(viewport, sourceFrameBuffer, srcWidth, srcHeight);
 
@@ -133,10 +153,15 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
     }
 
-    protected void initDepthStencil(int sourceFrameBuffer, int targetFb, int srcWidth, int srcHeight, int width, int height) {
+    protected void initDepthStencil(Viewport<?> viewport, int sourceFrameBuffer, int targetFb, int srcWidth, int srcHeight, int width, int height) {
         glClearNamedFramebufferfi(targetFb, GL_DEPTH_STENCIL, 0, this.properties.clearDepth(), 1);
-        // using blit to copy depth from mismatched depth formats is not portable so instead a full screen pass is performed for a depth copy
-        // the mismatched formats in this case is the d32 to d24s8
+        // Using a blit to copy depth from mismatched depth formats is not portable,
+        // so a full-screen pass is used for the copy.  The source framebuffer is
+        // rendered with Minecraft's projection while the target uses Voxy's much
+        // farther projection; copying the scalar depth value directly would move
+        // the near/far boundary and make LOD fragments fail the depth test.  The
+        // setup shader therefore reconstructs the source view-space position and
+        // projects it with the Voxy matrix before writing gl_FragDepth.
         glBindFramebuffer(GL30.GL_FRAMEBUFFER, targetFb);
 
         //If pixel passes, update stencil to 0 and set depth to 0
@@ -154,6 +179,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glBindTextureUnit(0, depthTexture);
         glBindSampler(0, DEPTH_SAMPLER);
         glUniform2f(1,((float)width)/srcWidth, ((float)height)/srcHeight);
+
+        Matrix4f sourceMvp = new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView);
+        sourceMvp.invert().getToAddress(SCRATCH);
+        nglUniformMatrix4fv(2, 1, false, SCRATCH);
+        viewport.MVP.getToAddress(SCRATCH);
+        nglUniformMatrix4fv(3, 1, false, SCRATCH);
+
         glDepthMask(true);
         glColorMask(false,false,false,false);
         this.depthStencilSetup.blit();
@@ -162,9 +194,12 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glDepthFunc(this.properties.closerEqualDepthCompare());
         glColorMask(true,true,true,true);
 
-        //Make voxy terrain render only where there isnt mc terrain
+        // Keep the old stencil values for diagnostics and shader-pack copies,
+        // but do not use them as an occupancy mask for LOD.  A source pixel can
+        // contain a nearer vanilla surface while a LOD water/terrain fragment is
+        // in front of it; the depth comparison above is the correct arbiter.
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilFunc(GL_EQUAL, 1, 0xFF);
+        glStencilFunc(GL_ALWAYS, 1, 0xFF);
     }
 
     private static final long SCRATCH = MemoryUtil.nmemAlloc(4*4*4);
@@ -176,6 +211,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
         blitShader.bind();
         glBindTextureUnit(0, srcDepthTex);
+        glBindSampler(0, DEPTH_SAMPLER);
         new Matrix4f(viewport.MVP).invert().getToAddress(SCRATCH);
         nglUniformMatrix4fv(1, 1, false, SCRATCH);//inverse fromProjection
         targetTransform.getToAddress(SCRATCH);//new Matrix4f(tooProjection).mul(vp.modelView).get(data);

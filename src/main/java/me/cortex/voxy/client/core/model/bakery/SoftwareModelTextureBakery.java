@@ -10,6 +10,9 @@ import me.cortex.voxy.common.util.UnsafeUtil;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ItemBlockRenderTypes;
 import net.minecraft.client.renderer.RenderType;
+//? if forge {
+import net.minecraft.client.resources.model.BakedModel;
+//?}
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
@@ -27,6 +30,10 @@ import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
 import net.minecraft.world.level.lighting.LevelLightEngine;
 import net.minecraft.world.level.material.FluidState;
 import org.jetbrains.annotations.Nullable;
+//? if forge {
+import net.minecraftforge.client.model.data.ModelData;
+import net.minecraftforge.client.model.data.ModelProperty;
+//?}
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -95,7 +102,7 @@ public class SoftwareModelTextureBakery {
         this.rasterizer.setSamplerTexture(pixels, width, height);
     }
 
-    private void bakeBlockModel(BlockState state, RenderType layer) {
+    private void bakeBlockModel(BlockState state, @Nullable BlockState materialState, RenderType fallbackLayer) {
         if (state.getRenderShape() == RenderShape.INVISIBLE) {
             return;// Dont bake if invisible
         }
@@ -104,15 +111,122 @@ public class SoftwareModelTextureBakery {
                 .getBlockModelShaper()
                 .getBlockModel(state);
 
+        // Forge's extended model API is required for models whose geometry is
+        // supplied by block-entity ModelData (Create Copycats are one such
+        // model).  The old three-argument call deliberately remains the
+        // Fabric/vanilla path.
+        //? if forge {
+        ModelData modelData = createForgeModelData(model, state, materialState);
+        SingleThreadedRandomSource random = new SingleThreadedRandomSource(42L);
+        List<RenderType> renderTypes = new ArrayList<>();
+        // CopycatModel inherits the default render-type lookup from the
+        // wrapper state, while its getQuads() validates against the material
+        // model.  Query the material model here so glass/cutout materials do
+        // not fall back to Copycat's blank base model.
+        var renderTypeModel = materialState == null ? model : Minecraft.getInstance()
+                .getModelManager().getBlockModelShaper().getBlockModel(materialState);
+        var renderTypeState = materialState == null ? state : materialState;
+        for (RenderType type : renderTypeModel.getRenderTypes(renderTypeState, random, ModelData.EMPTY)) {
+            renderTypes.add(type);
+        }
+        if (renderTypes.isEmpty()) {
+            renderTypes.add(fallbackLayer);
+        }
+        for (RenderType layer : renderTypes) {
+            random.setSeed(42L);
+            for (Direction direction : new Direction[] { Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH,
+                    Direction.WEST, Direction.EAST, null }) {
+                var quads = model.getQuads(state, direction, random, modelData, layer);
+                for (var quad : quads) {
+                    (layer == RenderType.translucent() ? this.translucentVC : this.opaqueVC)
+                            .quad(quad, (materialState != null ? materialState : state).is(BlockTags.LEAVES), layer);
+                }
+            }
+        }
+        //? } else {
         for (Direction direction : new Direction[] { Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH,
                 Direction.WEST, Direction.EAST, null }) {
             var quads = model.getQuads(state, direction, new SingleThreadedRandomSource(42L));
             for (var quad : quads) {
-                (layer == RenderType.translucent() ? this.translucentVC : this.opaqueVC)
-                        .quad(quad, state.is(BlockTags.LEAVES), layer);
+                (fallbackLayer == RenderType.translucent() ? this.translucentVC : this.opaqueVC)
+                        .quad(quad, state.is(BlockTags.LEAVES), fallbackLayer);
             }
         }
+        //?}
     }
+
+    // Create exposes its material property from CopycatModel.  Resolve it at
+    // runtime so Voxy still loads when Create is absent and does not add a hard
+    // common-source dependency on Create.
+    //? if forge {
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static ModelData createForgeModelData(BakedModel model, BlockState state, @Nullable BlockState materialState) {
+        if (materialState == null) {
+            return ModelData.EMPTY;
+        }
+        try {
+            Class<?> copycatModel = Class.forName("com.simibubi.create.content.decoration.copycat.CopycatModel");
+            java.lang.reflect.Field field = copycatModel.getField("MATERIAL_PROPERTY");
+            ModelProperty property = (ModelProperty) field.get(null);
+            ModelData initial = ModelData.builder().with(property, materialState).build();
+            // CopycatModel uses getModelData() to add wrapped material data and
+            // its occlusion mask.  Keep model-data evaluation deterministic by
+            // using a stable one-block view instead of touching the live world.
+            return model.getModelData(new SingleBlockModelWorld(state), BlockPos.ZERO, state, initial);
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException ignored) {
+            return ModelData.EMPTY;
+        }
+    }
+
+    private static final class SingleBlockModelWorld implements BlockAndTintGetter {
+        private final BlockState state;
+
+        private SingleBlockModelWorld(BlockState state) {
+            this.state = state;
+        }
+
+        @Override
+        public LevelLightEngine getLightEngine() {
+            return null;
+        }
+
+        @Override
+        public int getBlockTint(BlockPos pos, ColorResolver colorResolver) {
+            return -1;
+        }
+
+        @Nullable
+        @Override
+        public BlockEntity getBlockEntity(BlockPos pos) {
+            return null;
+        }
+
+        @Override
+        public BlockState getBlockState(BlockPos pos) {
+            return pos.equals(BlockPos.ZERO) ? this.state : Blocks.AIR.defaultBlockState();
+        }
+
+        @Override
+        public FluidState getFluidState(BlockPos pos) {
+            return this.getBlockState(pos).getFluidState();
+        }
+
+        @Override
+        public int getHeight() {
+            return 1;
+        }
+
+        @Override
+        public int getMinBuildHeight() {
+            return 0;
+        }
+
+        @Override
+        public float getShade(Direction direction, boolean shaded) {
+            return 0;
+        }
+    }
+    //?}
 
     private void bakeFluidState(BlockState state, int face, RenderType layer) {
         BlockAndTintGetter getter = new BlockAndTintGetter() {
@@ -217,6 +331,10 @@ public class SoftwareModelTextureBakery {
     // (0,0),(1,0),(2,0),(0,1),(1,1),(2,1)
 
     public int renderToOutput(BlockState state, long outputBuffer) {
+        return this.renderToOutput(state, null, outputBuffer);
+    }
+
+    public int renderToOutput(BlockState state, @Nullable BlockState materialState, long outputBuffer) {
         MemoryUtil.memSet(outputBuffer, 0, 16 * 16 * 8 * 6);
 
         boolean isBlock = true;
@@ -225,13 +343,14 @@ public class SoftwareModelTextureBakery {
         }
 
         RenderType blockRenderLayer = null;
+        BlockState renderState = materialState == null ? state : materialState;
         if (state.getBlock() instanceof LiquidBlock) {
             blockRenderLayer = ItemBlockRenderTypes.getRenderLayer(state.getFluidState());
         } else {
-            if (state.getBlock() instanceof LeavesBlock) {
+            if (renderState.getBlock() instanceof LeavesBlock) {
                 blockRenderLayer = RenderType.solid();
             } else {
-                blockRenderLayer = ItemBlockRenderTypes.getChunkRenderType(state);
+                blockRenderLayer = ItemBlockRenderTypes.getChunkRenderType(renderState);
             }
         }
 
@@ -248,7 +367,7 @@ public class SoftwareModelTextureBakery {
         if (isBlock) {
             this.opaqueVC.reset();
             this.translucentVC.reset();
-            this.bakeBlockModel(state, blockRenderLayer);
+            this.bakeBlockModel(state, materialState, blockRenderLayer);
             isAnyShaded |= this.opaqueVC.anyShaded | this.translucentVC.anyShaded;
             isAnyDarkend |= this.opaqueVC.anyDarkendTex | this.translucentVC.anyDarkendTex;
             anyTranslucent |= !this.translucentVC.isEmpty();

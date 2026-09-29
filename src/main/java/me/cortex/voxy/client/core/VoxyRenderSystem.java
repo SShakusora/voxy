@@ -76,6 +76,7 @@ public class VoxyRenderSystem {
 
     private final AbstractRenderPipeline pipeline;
     private final RenderProperties properties;
+    private Viewport<?> lastMainViewport;
 
     // Fog parameters captured before modification by MixinFogRenderer, for Voxy's own fog pass
     private float capturedFogStart;
@@ -279,6 +280,12 @@ public class VoxyRenderSystem {
             throw new IllegalStateException("Cannot use the default framebuffer as cannot source from it");
         }
 
+        // Keep the frame's camera matrices so the Iris LevelRenderer hook can
+        // merge opaque Voxy depth after all terrain passes and before entities.
+        if (!IrisUtil.irisShadowActive()) {
+            this.lastMainViewport = viewport;
+        }
+
         //this.autoBalanceSubDivSize();
 
         this.pipeline.preSetup(viewport);
@@ -375,7 +382,31 @@ public class VoxyRenderSystem {
         TimingStatistics.F.start();
         this.postProcessing.renderPost(viewport, matrices.projection(), boundFB);
         TimingStatistics.F.stop();
-         */
+        */
+    }
+
+    /**
+     * Merge opaque Voxy depth into the framebuffer currently used by the main
+     * LevelRenderer pass.  This is called immediately before dynamic geometry
+     * (entities and block entities) is submitted.
+     */
+    public void prepareDepthForDynamicGeometry() {
+        if (this.lastMainViewport == null || IrisUtil.irisShadowActive()) {
+            return;
+        }
+
+        int outputFramebuffer = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+        if (outputFramebuffer == 0) {
+            return;
+        }
+
+        int[] viewport = new int[4];
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        if (viewport[2] <= 0 || viewport[3] <= 0) {
+            return;
+        }
+
+        this.pipeline.prepareDepthForDynamicGeometry(this.lastMainViewport, outputFramebuffer, viewport[2], viewport[3]);
     }
 
 

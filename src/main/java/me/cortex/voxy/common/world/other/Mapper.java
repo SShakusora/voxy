@@ -26,6 +26,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 
 import org.lwjgl.system.MemoryUtil;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -51,7 +52,14 @@ public class Mapper {
     public static final long AIR = 0;
 
     private final ReentrantLock blockLock = new ReentrantLock();
-    private final ConcurrentHashMap<BlockState, StateEntry> block2stateEntry = new ConcurrentHashMap<>(2000,0.75f, 10);
+    /**
+     * A block's render appearance is not always completely described by its
+     * BlockState.  Forge models such as Create's Copycats keep the material in
+     * a block entity, so the material state is part of the mapping key too.
+     */
+    private record StateKey(BlockState state, @Nullable BlockState materialState) {}
+
+    private final ConcurrentHashMap<StateKey, StateEntry> block2stateEntry = new ConcurrentHashMap<>(2000,0.75f, 10);
     private final ObjectArrayList<StateEntry> blockId2stateEntry = new ObjectArrayList<>();
 
 
@@ -64,8 +72,8 @@ public class Mapper {
     public Mapper(IMappingStorage storage) {
         this.storage = storage;
         //Insert air since its a special entry (index 0)
-        var airEntry = new StateEntry(0, Blocks.AIR.defaultBlockState());
-        this.block2stateEntry.put(airEntry.state, airEntry);
+        var airEntry = new StateEntry(0, Blocks.AIR.defaultBlockState(), null);
+        this.block2stateEntry.put(new StateKey(airEntry.state, null), airEntry);
         this.blockId2stateEntry.add(airEntry);
 
         this.loadFromStorage();
@@ -131,7 +139,7 @@ public class Mapper {
                     continue;
                 }
                 sentries.add(sentry);
-                var oldEntry = this.block2stateEntry.putIfAbsent(sentry.state, sentry);
+                var oldEntry = this.block2stateEntry.putIfAbsent(new StateKey(sentry.state, sentry.materialState), sentry);
                 if (oldEntry != null) {
                     //forceResave[0] |= true;
                     Logger.warn("Multiple mappings for blockstate, using old state, expect things to possibly go really badly. " + oldEntry.id + ":" + sentry.id + ":" + sentry.state );
@@ -154,7 +162,7 @@ public class Mapper {
             for (var error : sentryErrors) {
                 while (true) {
                     var state = new StateEntry(error.right(), Block.BLOCK_STATE_REGISTRY.byId(rand.nextInt(Block.BLOCK_STATE_REGISTRY.size() - 1)));
-                    if (this.block2stateEntry.put(state.state, state) == null) {
+                    if (this.block2stateEntry.put(new StateKey(state.state, state.materialState), state) == null) {
                         sentries.add(state);
                         break;
                     }
@@ -187,17 +195,18 @@ public class Mapper {
         return this.blockId2stateEntry.size();
     }
 
-    private StateEntry registerNewBlockState(BlockState state) {
+    private StateEntry registerNewBlockState(BlockState state, @Nullable BlockState materialState) {
         this.blockLock.lock();
-        var entry = this.block2stateEntry.get(state);
+        var key = new StateKey(state, materialState);
+        var entry = this.block2stateEntry.get(key);
         if (entry != null) {
             this.blockLock.unlock();
             return entry;
         }
 
-        entry = new StateEntry(this.blockId2stateEntry.size(), state);
+        entry = new StateEntry(this.blockId2stateEntry.size(), state, materialState);
         this.blockId2stateEntry.add(entry);
-        this.block2stateEntry.put(state, entry);
+        this.block2stateEntry.put(key, entry);
         this.blockLock.unlock();
 
         byte[] serialized = entry.serialize();
@@ -248,14 +257,28 @@ public class Mapper {
     }
 
     public int getIdForBlockState(BlockState state) {
+        return this.getIdForBlockAppearance(state, null);
+    }
+
+    /**
+     * Returns the persistent ID for a block state and its optional visual
+     * material.  A null material preserves the old, ordinary BlockState-only
+     * mapping behaviour.
+     */
+    public int getIdForBlockAppearance(BlockState state, @Nullable BlockState materialState) {
         if (state.isAir()) {
             return 0;
         }
-        var mapping = this.block2stateEntry.get(state);
+        var mapping = this.block2stateEntry.get(new StateKey(state, materialState));
         if (mapping == null) {
-            mapping = this.registerNewBlockState(state);
+            mapping = this.registerNewBlockState(state, materialState);
         }
         return mapping.id;
+    }
+
+    @Nullable
+    public BlockState getMaterialStateFromBlockId(int blockId) {
+        return this.blockId2stateEntry.get(blockId).materialState;
     }
 
     public int getBlockStateOpacity(long mappingId) {
@@ -358,10 +381,18 @@ public class Mapper {
     public static final class StateEntry {
         public final int id;
         public final BlockState state;
+        @Nullable
+        public final BlockState materialState;
         public final int opacity;
+
         public StateEntry(int id, BlockState state) {
+            this(id, state, null);
+        }
+
+        public StateEntry(int id, BlockState state, @Nullable BlockState materialState) {
             this.id = id;
             this.state = state;
+            this.materialState = materialState;
             //Override opacity of leaves to be solid
             if (state.getBlock() instanceof LeavesBlock) {
                 this.opacity = 15;
@@ -402,6 +433,9 @@ public class Mapper {
                 var serialized = new CompoundTag();
                 serialized.putInt("id", this.id);
                 serialized.put("block_state", BlockState.CODEC.encodeStart(NbtOps.INSTANCE, this.state).result().get());
+                if (this.materialState != null) {
+                    serialized.put("material_state", BlockState.CODEC.encodeStart(NbtOps.INSTANCE, this.materialState).result().get());
+                }
                 var out = new ByteArrayOutputStream();
                 NbtIo.writeCompressed(serialized, out);
                 return out.toByteArray();
@@ -418,20 +452,29 @@ public class Mapper {
                 }
                 var bsc = compound.getCompound("block_state");
                 var state = BlockState.CODEC.parse(NbtOps.INSTANCE, bsc);
+                BlockState materialState = null;
+                if (compound.contains("material_state")) {
+                    var material = BlockState.CODEC.parse(NbtOps.INSTANCE, compound.getCompound("material_state"));
+                    if (material.result().isPresent()) {
+                        materialState = material.result().get();
+                    } else {
+                        forceResave[0] |= true;
+                    }
+                }
                 if (state.isError()) {
                     Logger.info("Could not decode blockstate, attempting fixes, error: "+ state.error().get().message());
                     bsc = (CompoundTag) DataFixers.getDataFixer().update(References.BLOCK_STATE, new Dynamic<>(NbtOps.INSTANCE,bsc),0, SharedConstants.getCurrentVersion().getDataVersion().getVersion()).getValue();
                     state = BlockState.CODEC.parse(NbtOps.INSTANCE, bsc);
                     if (state.isError()) {
                         Logger.error("Could not decode blockstate setting to air. id:" + id + " error: " + state.error().get().message());
-                        return new StateEntry(id, Blocks.AIR.defaultBlockState());
+                        return new StateEntry(id, Blocks.AIR.defaultBlockState(), null);
                     } else {
                         Logger.info("Fixed blockstate to: " + state.getOrThrow());
                         forceResave[0] |= true;
-                        return new StateEntry(id, state.getOrThrow());
+                        return new StateEntry(id, state.getOrThrow(), materialState);
                     }
                 } else {
-                    return new StateEntry(id, state.getOrThrow());
+                    return new StateEntry(id, state.getOrThrow(), materialState);
                 }
             } catch (IOException e) {
                 throw new RuntimeException(e);

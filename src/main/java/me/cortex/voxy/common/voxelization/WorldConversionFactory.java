@@ -120,7 +120,7 @@ public class WorldConversionFactory {
                                            PalettedContainer<BlockState> blockContainer,
                                            PalettedContainerRO<Holder<Biome>> biomeContainer,
                                            ILightingSupplier lightSupplier) {
-        return convert(section, stateMapper, blockContainer, biomeContainer, lightSupplier, false, 0);
+        return convert(section, stateMapper, blockContainer, biomeContainer, lightSupplier, null, false, 0);
     }
 
     public static VoxelizedSection convert(VoxelizedSection section,
@@ -128,6 +128,26 @@ public class WorldConversionFactory {
                                            PalettedContainer<BlockState> blockContainer,
                                            PalettedContainerRO<Holder<Biome>> biomeContainer,
                                            ILightingSupplier lightSupplier,
+                                           BlockState[] materialStates) {
+        return convert(section, stateMapper, blockContainer, biomeContainer, lightSupplier, materialStates, false, 0);
+    }
+
+    public static VoxelizedSection convert(VoxelizedSection section,
+                                           Mapper stateMapper,
+                                           PalettedContainer<BlockState> blockContainer,
+                                           PalettedContainerRO<Holder<Biome>> biomeContainer,
+                                           ILightingSupplier lightSupplier,
+                                           boolean shouldZoom,
+                                           long zoomSeed) {
+        return convert(section, stateMapper, blockContainer, biomeContainer, lightSupplier, null, shouldZoom, zoomSeed);
+    }
+
+    public static VoxelizedSection convert(VoxelizedSection section,
+                                           Mapper stateMapper,
+                                           PalettedContainer<BlockState> blockContainer,
+                                           PalettedContainerRO<Holder<Biome>> biomeContainer,
+                                           ILightingSupplier lightSupplier,
+                                           BlockState[] materialStates,
                                            boolean shouldZoom,
                                            long zoomSeed) {
         //Cheat by creating a local pallet then read the data directly
@@ -146,8 +166,15 @@ public class WorldConversionFactory {
             bps = _bps;
             pcc = bps.getSize();
         } else {
-            pcc = setupLocalPalette(vp, blockCache, stateMapper, pc);
-            pcc = Math.max(0,pcc-1);
+            if (materialStates == null) {
+                pcc = setupLocalPalette(vp, blockCache, stateMapper, pc);
+                pcc = Math.max(0,pcc-1);
+            } else {
+                // Visual materials are position-dependent, so a local palette
+                // cannot be cached as BlockState -> ID.  Keep only its bounds
+                // and resolve the appearance for each voxel below.
+                pcc = Math.max(0, vp.getSize() - 1);
+            }
         }
 
         {
@@ -188,9 +215,18 @@ public class WorldConversionFactory {
                 }
                 int bId;
                 if (bps == null) {
-                    bId = pc[Math.min((int) (sample & MSK), pcc)];
+                    int paletteId = (int) (sample & MSK);
+                    if (materialStates == null) {
+                        bId = pc[Math.min(paletteId, pcc)];
+                    } else {
+                        BlockState state = vp.valueFor(Math.min(paletteId, pcc));
+                        bId = stateMapper.getIdForBlockAppearance(state, materialStates[i]);
+                    }
                 } else {
-                    bId = stateMapper.getIdForBlockState(bps.valueFor((int) (sample&MSK)));
+                    BlockState state = bps.valueFor((int) (sample&MSK));
+                    bId = materialStates == null
+                            ? stateMapper.getIdForBlockState(state)
+                            : stateMapper.getIdForBlockAppearance(state, materialStates[i]);
                 }
                 sample >>>= eBits;
 
@@ -203,15 +239,23 @@ public class WorldConversionFactory {
                 throw new IllegalStateException();
             }
             int bId = pc[0];
-            if (bId == 0) {//Its air
+            if (materialStates == null && bId == 0) {//Its air
                 for (int i = 0; i <= 0xFFF; i++) {
                     data[i] = Mapper.airWithLight(lightSupplier.supply(i&0xF, (i>>8)&0xF, (i>>4)&0xF));
                 }
-            } else {
+            } else if (materialStates == null) {
                 nonZeroCnt = 4096;
                 for (int i = 0; i <= 0xFFF; i++) {
                     byte light = lightSupplier.supply(i&0xF, (i>>8)&0xF, (i>>4)&0xF);
                     data[i] = Mapper.composeMappingId(light, bId, biomes[Integer.compress(i,0b1100_1100_1100)]);
+                }
+            } else {
+                BlockState state = vp.valueFor(0);
+                for (int i = 0; i <= 0xFFF; i++) {
+                    int visualId = stateMapper.getIdForBlockAppearance(state, materialStates[i]);
+                    byte light = lightSupplier.supply(i&0xF, (i>>8)&0xF, (i>>4)&0xF);
+                    nonZeroCnt += visualId != 0 ? 1 : 0;
+                    data[i] = Mapper.composeMappingId(light, visualId, biomes[Integer.compress(i,0b1100_1100_1100)]);
                 }
             }
         }

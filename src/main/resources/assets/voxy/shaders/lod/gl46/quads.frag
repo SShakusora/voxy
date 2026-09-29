@@ -10,7 +10,6 @@
 #endif
 
 layout(binding = 0) uniform sampler2D blockModelAtlas;
-layout(binding = 2) uniform sampler2D depthTex;
 
 //#define DEBUG_RENDER
 
@@ -155,13 +154,6 @@ void main() {
         discard;
         return;
     }
-
-    //Check the minimum bounding texture and ensure we are greater than it
-    if (DEPTH_SCALAR_COMPARE(gl_FragCoord.z, texelFetch(depthTex, ivec2(gl_FragCoord.xy), 0).r)) {
-        discard;
-        return;
-    }
-
 
     //Also, small quad is really fking over the mipping level somehow
     #ifndef TRANSLUCENT

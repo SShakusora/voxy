@@ -14,14 +14,40 @@ import me.cortex.voxy.client.iris.IrisVoxyRenderPipelineData;
 import net.irisshaders.iris.shaderpack.materialmap.WorldRenderingSettings;
 import org.joml.Matrix4f;
 import org.lwjgl.opengl.GL30;
+import org.lwjgl.system.MemoryStack;
 
 import java.util.List;
 import java.util.function.BooleanSupplier;
 
+import static org.lwjgl.opengl.GL11C.GL_BLEND;
+import static org.lwjgl.opengl.GL11C.GL_COLOR_WRITEMASK;
 import static org.lwjgl.opengl.GL11.GL_DEPTH_BUFFER_BIT;
+import static org.lwjgl.opengl.GL11C.GL_CULL_FACE;
+import static org.lwjgl.opengl.GL11C.GL_DEPTH_FUNC;
+import static org.lwjgl.opengl.GL11C.GL_DEPTH_WRITEMASK;
+import static org.lwjgl.opengl.GL11C.GL_SCISSOR_TEST;
+import static org.lwjgl.opengl.GL11C.GL_STENCIL_TEST;
+import static org.lwjgl.opengl.GL11C.GL_TEXTURE_BINDING_2D;
+import static org.lwjgl.opengl.GL11C.GL_VIEWPORT;
+import static org.lwjgl.opengl.GL11C.glColorMask;
+import static org.lwjgl.opengl.GL11C.glDepthMask;
+import static org.lwjgl.opengl.GL11C.glDisable;
+import static org.lwjgl.opengl.GL11C.glEnable;
+import static org.lwjgl.opengl.GL11C.glGetBoolean;
+import static org.lwjgl.opengl.GL11C.glGetBooleanv;
+import static org.lwjgl.opengl.GL11C.glGetInteger;
+import static org.lwjgl.opengl.GL11C.glGetIntegerv;
+import static org.lwjgl.opengl.GL11C.glIsEnabled;
+import static org.lwjgl.opengl.GL11C.glViewport;
 import static org.lwjgl.opengl.GL30C.*;
 import static org.lwjgl.opengl.GL31.GL_UNIFORM_BUFFER;
 import static org.lwjgl.opengl.GL45C.*;
+import static org.lwjgl.opengl.GL15C.GL_ELEMENT_ARRAY_BUFFER;
+import static org.lwjgl.opengl.GL15C.GL_ELEMENT_ARRAY_BUFFER_BINDING;
+import static org.lwjgl.opengl.GL15C.glBindBuffer;
+import static org.lwjgl.opengl.GL20C.GL_CURRENT_PROGRAM;
+import static org.lwjgl.opengl.GL20C.glUseProgram;
+import static org.lwjgl.opengl.GL33C.GL_SAMPLER_BINDING;
 
 public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     private final IrisVoxyRenderPipelineData data;
@@ -128,13 +154,17 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
             srcWidth = viewport.width;
             srcHeight = viewport.height;
         }
-        this.initDepthStencil(sourceFramebuffer, this.fb.framebuffer.id, srcWidth, srcHeight, viewport.width, viewport.height);
+        this.initDepthStencil(viewport, sourceFramebuffer, this.fb.framebuffer.id, srcWidth, srcHeight, viewport.width, viewport.height);
         return this.fb.getDepthTex().id;
     }
 
     @Override
     protected void postOpaquePreTranslucent(Viewport<?> viewport, int sourceFrameBuffer) {
-        if (this.shaderDepthHackFixTransformBlit != null) {
+        // The depth setup now reconstructs the vanilla occluder with the Voxy
+        // projection.  The legacy hack writes FAR over stencil==0 pixels and
+        // would erase that reconstructed depth, so it is only valid for the
+        // old sentinel-based setup.
+        if (!this.usesDepthAwareVanillaDepth() && this.shaderDepthHackFixTransformBlit != null) {
             this.fb.bind();
             glEnable(GL_DEPTH_TEST);
             glColorMask(false, false, false, false);
@@ -159,6 +189,80 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
             msk |= GL_COLOR_BUFFER_BIT;
         }
         glBlitNamedFramebuffer(this.fb.framebuffer.id, this.fbTranslucent.framebuffer.id, 0,0, viewport.width, viewport.height, 0,0, viewport.width, viewport.height, msk, GL_NEAREST);
+    }
+
+    @Override
+    public void prepareDepthForDynamicGeometry(Viewport<?> viewport, int outputFramebuffer, int outputWidth, int outputHeight) {
+        // The shader pack requested that Voxy stay out of the vanilla depth
+        // attachment.  Dynamic entities still need opaque LOD depth for their
+        // normal depth test, so merge only the opaque framebuffer here.  The
+        // translucent framebuffer is deliberately not used as it contains water
+        // and other geometry that must not occlude Create/Flywheel parts.
+        if (this.data.renderToVanillaDepth || viewport == null || outputFramebuffer == 0 || outputWidth <= 0 || outputHeight <= 0 || this.fb.getDepthTex() == null) {
+            return;
+        }
+
+        int previousDrawFramebuffer = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+        int previousReadFramebuffer = glGetInteger(GL_READ_FRAMEBUFFER_BINDING);
+        int previousProgram = glGetInteger(GL_CURRENT_PROGRAM);
+        int previousVertexArray = glGetInteger(GL_VERTEX_ARRAY_BINDING);
+        int previousElementArray = glGetInteger(GL_ELEMENT_ARRAY_BUFFER_BINDING);
+        int previousTexture = org.lwjgl.opengl.GL30.glGetIntegeri(GL_TEXTURE_BINDING_2D, 0);
+        int previousSampler = org.lwjgl.opengl.GL30.glGetIntegeri(GL_SAMPLER_BINDING, 0);
+        int[] previousViewport = new int[4];
+        glGetIntegerv(GL_VIEWPORT, previousViewport);
+
+        int previousDepthFunction = glGetInteger(GL_DEPTH_FUNC);
+        boolean previousDepthTest = glIsEnabled(GL_DEPTH_TEST);
+        boolean previousStencilTest = glIsEnabled(GL_STENCIL_TEST);
+        boolean previousBlend = glIsEnabled(GL_BLEND);
+        boolean previousCull = glIsEnabled(GL_CULL_FACE);
+        boolean previousScissor = glIsEnabled(GL_SCISSOR_TEST);
+        boolean previousDepthMask = glGetBoolean(GL_DEPTH_WRITEMASK);
+        boolean[] previousColorMask = new boolean[4];
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            var colorMask = stack.malloc(4);
+            glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
+            for (int i = 0; i < previousColorMask.length; i++) {
+                previousColorMask[i] = colorMask.get(i) != 0;
+            }
+        }
+
+        try {
+            glBindFramebuffer(GL_FRAMEBUFFER, outputFramebuffer);
+            glViewport(0, 0, outputWidth, outputHeight);
+            glDisable(GL_STENCIL_TEST);
+            glDisable(GL_BLEND);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_SCISSOR_TEST);
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(this.properties.closerEqualDepthCompare());
+            glDepthMask(true);
+            glColorMask(false, false, false, false);
+
+            AbstractRenderPipeline.transformBlitDepth(this.depthBlit,
+                    this.fb.getDepthTex().id, outputFramebuffer,
+                    viewport, new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView));
+        } finally {
+            glColorMask(previousColorMask[0], previousColorMask[1], previousColorMask[2], previousColorMask[3]);
+            glDepthMask(previousDepthMask);
+            glDepthFunc(previousDepthFunction);
+
+            if (previousDepthTest) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+            if (previousStencilTest) glEnable(GL_STENCIL_TEST); else glDisable(GL_STENCIL_TEST);
+            if (previousBlend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+            if (previousCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+            if (previousScissor) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, previousDrawFramebuffer);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, previousReadFramebuffer);
+            glViewport(previousViewport[0], previousViewport[1], previousViewport[2], previousViewport[3]);
+            glUseProgram(previousProgram);
+            glBindVertexArray(previousVertexArray);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, previousElementArray);
+            glBindTextureUnit(0, previousTexture);
+            glBindSampler(0, previousSampler);
+        }
     }
 
     @Override

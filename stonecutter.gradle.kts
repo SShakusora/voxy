@@ -1,5 +1,7 @@
 plugins {
     id("dev.kikugie.stonecutter")
+    id("net.neoforged.moddev") version "2.0.141" apply false
+    id("net.neoforged.moddev.legacyforge") version "2.0.141" apply false
 }
 // Stonecutter activation is controlled from settings.gradle.kts (generate all variants by default)
 stonecutter {

@@ -11,7 +11,7 @@ extra["additionalSourceJavaDirs"] = listOf(
 )
 
 plugins {
-    id("net.neoforged.moddev") version "2.0.141"
+    id("net.neoforged.moddev")
     id("me.modmuss50.mod-publish-plugin") version "2.0.0-beta.1"
     id("dev.kikugie.fletching-table.neoforge") version "0.1.0-alpha.23"
     id("org.sinytra.adapter.userdev") version "1.2.1-SNAPSHOT"

@@ -17,6 +17,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.dimension.DimensionType;
 
 import java.util.function.Supplier;
@@ -72,14 +73,14 @@ public abstract class MixinClientLevel {
             var csp = SectionPos.of(pos);
             //Is not using voxy$cheekyGetChunk as dont think is need
             var chunk = self.getChunk(pos.getX()>>4, pos.getZ()>>4, ChunkStatus.FULL, false);
-            if (chunk != null) {
-                var section = chunk.getSection(csp.y() - this.bottomSectionY);
+            if (chunk instanceof LevelChunk levelChunk) {
+                var section = levelChunk.getSection(csp.y() - this.bottomSectionY);
                 var lp = self.getLightEngine();
 
                 var blp = lp.getLayerListener(LightLayer.BLOCK).getDataLayerData(csp);
                 var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
 
-                VoxelIngestService.rawIngest(wi, section, csp.x(), csp.y(), csp.z(), blp == null ? null : blp.copy(), slp == null ? null : slp.copy());
+                VoxelIngestService.rawIngest(wi, levelChunk, section, csp.x(), csp.y(), csp.z(), blp == null ? null : blp.copy(), slp == null ? null : slp.copy());
             }
         }
     }

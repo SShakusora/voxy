@@ -60,4 +60,31 @@ public class MixinLevelRenderer {
             }
         }
     }
+
+    @Inject(method = "renderLevel", at = @At(value = "INVOKE_STRING",
+            target = "Lnet/minecraft/util/profiling/ProfilerFiller;popPush(Ljava/lang/String;)V",
+            args = "ldc=entities", shift = At.Shift.BEFORE))
+    private void voxy$prepareDynamicDepth(
+            //? if 1.21.1
+            DeltaTracker tickCounter,
+            //? if 1.20.1 {
+            PoseStack matrices,
+            float tickDelta,
+            long limitTime,
+            //?}
+            boolean renderBlockOutline,
+            Camera camera,
+            GameRenderer gameRenderer,
+            LightTexture lightTexture,
+            //? if 1.21.1
+            Matrix4f positionMatrix,
+            Matrix4f projectionMatrix,
+            CallbackInfo ci) {
+        if (IrisUtil.irisShaderPackEnabled()) {
+            var renderer = ((IGetVoxyRenderSystem) this).voxy$getRenderSystem();
+            if (renderer != null) {
+                renderer.prepareDepthForDynamicGeometry();
+            }
+        }
+    }
 }

@@ -27,6 +27,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.PalettedContainerRO;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.chunk.storage.RegionFileVersion;
+import org.jetbrains.annotations.Nullable;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.lwjgl.system.MemoryUtil;
@@ -40,6 +41,8 @@ import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -487,10 +490,11 @@ public class WorldImporter implements IDataImporter {
                 Logger.error("Chunk position is not located in correct region, expected: (" + regionX + ", " + regionZ+"), got: " + "(" + (x>>5) + ", " + (z>>5)+"), importing anyway");
             }
 
+            Map<Integer, BlockState[]> materialStates = readCopycatMaterials(chunk);
             for (var sectionE : chunk.getList("sections", Tag.TAG_COMPOUND)) {
                 var section = (CompoundTag) sectionE;
                 int y = section.getInt("Y");
-                this.importSectionNBT(x, y, z, section);
+                this.importSectionNBT(x, y, z, section, materialStates.get(y));
             }
         } catch (Exception e) {
             Logger.error("Exception importing world chunk:",e);
@@ -501,7 +505,33 @@ public class WorldImporter implements IDataImporter {
 
     private static final byte[] EMPTY = new byte[0];
     private static final ThreadLocal<VoxelizedSection> SECTION_CACHE = ThreadLocal.withInitial(VoxelizedSection::createEmpty);
-    private void importSectionNBT(int x, int y, int z, CompoundTag section) {
+    private static Map<Integer, BlockState[]> readCopycatMaterials(CompoundTag chunk) {
+        Map<Integer, BlockState[]> result = new HashMap<>();
+        if (!chunk.contains("block_entities")) {
+            return result;
+        }
+        for (var entityTag : chunk.getList("block_entities", Tag.TAG_COMPOUND)) {
+            CompoundTag entity = (CompoundTag) entityTag;
+            String id = entity.getString("id").toLowerCase(java.util.Locale.ROOT);
+            if (!id.contains("copycat")) continue;
+            CompoundTag materialTag = entity.contains("Material")
+                    ? entity.getCompound("Material")
+                    : entity.getCompound("material");
+            if (materialTag.isEmpty()) continue;
+            var materialResult = BlockState.CODEC.parse(NbtOps.INSTANCE, materialTag);
+            if (materialResult.result().isEmpty()) continue;
+
+            int blockX = entity.getInt("x") & 15;
+            int blockY = entity.getInt("y");
+            int blockZ = entity.getInt("z") & 15;
+            int sectionY = blockY >> 4;
+            BlockState[] sectionMaterials = result.computeIfAbsent(sectionY, ignored -> new BlockState[16 * 16 * 16]);
+            sectionMaterials[blockX | (blockZ << 4) | ((blockY & 15) << 8)] = materialResult.result().get();
+        }
+        return result;
+    }
+
+    private void importSectionNBT(int x, int y, int z, CompoundTag section, @Nullable BlockState[] materialStates) {
         if (section.getCompound("block_states").isEmpty()) {
             return;
         }
@@ -555,7 +585,8 @@ public class WorldImporter implements IDataImporter {
                         sky = skyLight.get(bx, by, bz);
                     }
                     return (byte) (sky|(block<<4));
-                }
+                },
+                materialStates
         );
 
         WorldVoxilizedSectionMipper.mipSection(csec, this.world.getMapper());

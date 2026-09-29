@@ -155,7 +155,7 @@ public class ModelFactory {
         this.customBlockStateIdMapping = mapping;
     }
 
-    private static final record BlockBake(int blockId, BlockState state) {
+    private static final record BlockBake(int blockId, BlockState state, @Nullable BlockState materialState) {
     }
 
     public boolean addEntry(int blockId) {
@@ -166,6 +166,7 @@ public class ModelFactory {
 
 
         var blockState = this.mapper.getBlockStateFromBlockId(blockId);
+        var materialState = this.mapper.getMaterialStateFromBlockId(blockId);
         if (blockState.getBlock() instanceof StairBlock sb) {
                 /*
                 if (sb.baseState.hasProperty(BlockStateProperties.WATERLOGGED)) {
@@ -215,7 +216,7 @@ public class ModelFactory {
             if (this.idMappings[blockId] != -1) {
                 return false;
             }
-            this.bakeQueue.add(new BlockBake(blockId, blockState));
+            this.bakeQueue.add(new BlockBake(blockId, blockState, materialState));
             return true;
 
         } finally {
@@ -228,7 +229,7 @@ public class ModelFactory {
         if (bake == null) return false;
         ColourDepthTextureData[] textureData = new ColourDepthTextureData[6];
 
-        int flags = this.bakery2.renderToOutput(bake.state, this.bakeScratchBuffer);
+        int flags = this.bakery2.renderToOutput(bake.state, bake.materialState, this.bakeScratchBuffer);
 
 
         {//Create texture data
@@ -285,7 +286,8 @@ public class ModelFactory {
         if (layer==null && (flags&8)!=0) {
             layer = RenderType.cutout();
         }
-        if (bake.state.is(BlockTags.LEAVES)) {
+        BlockState renderState = bake.materialState == null ? bake.state : bake.materialState;
+        if (renderState.is(BlockTags.LEAVES)) {
             layer = RenderType.solid();
         }
         if (layer == null) {
@@ -293,7 +295,7 @@ public class ModelFactory {
         }
 
 
-        var bakeResult = this.processTextureBakeResult(bake.blockId, bake.state, textureData, isShaded, hasDarkenedTextures, layer);
+        var bakeResult = this.processTextureBakeResult(bake.blockId, bake.state, bake.materialState, textureData, isShaded, hasDarkenedTextures, layer);
         if (bakeResult!=null) {
             this.uploadResults.add(bakeResult);
         }
@@ -388,7 +390,7 @@ public class ModelFactory {
         }
     }
 
-    private ModelBakeResultUpload processTextureBakeResult(int blockId, BlockState blockState, ColourDepthTextureData[] textureData, boolean isShaded, boolean darkenedTinting, RenderType layer) {
+    private ModelBakeResultUpload processTextureBakeResult(int blockId, BlockState blockState, @Nullable BlockState materialState, ColourDepthTextureData[] textureData, boolean isShaded, boolean darkenedTinting, RenderType layer) {
         if (this.idMappings[blockId] != -1) {
             //This should be impossible to reach as it means that multiple bakes for the same blockId happened and where inflight at the same time!
             throw new IllegalStateException("Block id already added: " + blockId + " for state: " + blockState);
@@ -421,16 +423,19 @@ public class ModelFactory {
             }
         }
 
-        var colourProvider = getColourProvider(blockState.getBlock());
+        // A Copycat quad is geometrically owned by the wrapper state but its
+        // tint comes from the copied material state.
+        BlockState colourState = materialState == null ? blockState : materialState;
+        var colourProvider = getColourProvider(colourState.getBlock());
 
         boolean isBiomeColourDependent = false;
         if (colourProvider != null) {
-            isBiomeColourDependent = isBiomeDependentColour(colourProvider, blockState);
+            isBiomeColourDependent = isBiomeDependentColour(colourProvider, colourState);
         }
 
         ModelEntry entry;
         {//Deduplicate same entries
-            entry = new ModelEntry(textureData, clientFluidStateId, isBiomeColourDependent||colourProvider==null?-1:captureColourConstant(colourProvider, blockState, DEFAULT_BIOME)|0xFF000000);
+            entry = new ModelEntry(textureData, clientFluidStateId, isBiomeColourDependent||colourProvider==null?-1:captureColourConstant(colourProvider, colourState, DEFAULT_BIOME)|0xFF000000);
             int possibleDuplicate = this.modelTexture2id.getInt(entry);
             if (possibleDuplicate != -1) {//Duplicate found
                 this.idMappings[blockId] = possibleDuplicate;
