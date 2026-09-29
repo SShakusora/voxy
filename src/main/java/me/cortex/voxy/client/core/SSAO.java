@@ -126,7 +126,7 @@ public class SSAO {
 
     }
 
-    public void computeSSAO(Viewport<?> viewport, GlTexture colourOut, GlTexture colourIn, GlTexture baseDepthTex, int sourceFramebuffer) {
+    public void computeSSAO(Viewport<?> viewport, GlTexture colourOut, GlTexture colourIn, GlTexture lodMaskTex, GlTexture baseDepthTex, int sourceFramebuffer) {
         this.ssaoCompute.bind();
         //The matrices
         try (var stack = MemoryStack.stackPush()) {
@@ -154,6 +154,8 @@ public class SSAO {
         glBindSampler(1,0);
         glBindTextureUnit(2, baseDepthTex.id);
         glBindSampler(2, this.depthSampler);
+        glBindTextureUnit(4, lodMaskTex.id);
+        glBindSampler(4, 0);
 
         if (this.isBetterSSAO) {
             int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFramebuffer, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
@@ -169,6 +171,8 @@ public class SSAO {
         glBindSampler(2, 0);
         glBindTextureUnit(3, 0);
         glBindSampler(3, 0);
+        glBindTextureUnit(4, 0);
+        glBindSampler(4, 0);
     }
 
     public void free() {

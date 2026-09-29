@@ -20,6 +20,15 @@ bool shouldRender(ivec3 icorner) {
     vec3 corner = vec3(mix(mix(ivec3(0), icorner-1, greaterThan(icorner-1, ivec3(0))), icorner+17, lessThan(icorner+17, ivec3(0))))-negInnerBlock.xyz;
     bool visible = (corner.x*corner.x + corner.z*corner.z) < (negInnerBlock.w*negInnerBlock.w);
     visible = visible && abs(corner.y) < negInnerBlock.w;
+    // The exact vanilla depth/stencil mask handles the whole inner view. The
+    // conservative AABB is needed only for the outer transition band, where
+    // a loaded vanilla section and its LoD representation intentionally overlap.
+    // Keeping it out of the interior prevents empty caves/air from becoming
+    // permanent holes in the LoD surface.
+    float boundaryStart = max(0.0f, negInnerBlock.w-32.0f);
+    bool boundary = (corner.x*corner.x + corner.z*corner.z) >= boundaryStart*boundaryStart
+            || abs(corner.y) >= boundaryStart;
+    visible = visible && boundary;
     return visible;
 }
 

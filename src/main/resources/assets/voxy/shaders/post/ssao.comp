@@ -4,6 +4,9 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0, rgba8) uniform writeonly restrict image2D colourTexOut;
 layout(binding = 1) uniform sampler2D colourTex;
 layout(binding = 2) uniform sampler2D depthTex;
+// Written by the normal LoD pass independently of the colour attachment.
+// It is the authoritative per-frame coverage mask for SSAO and compositing.
+layout(binding = 4) uniform sampler2D lodMaskTex;
 
 #import <voxy:util/depthutils.glsl>
 
@@ -53,6 +56,12 @@ vec4 reDeProject(vec3 pos) {
         return vec4(-1.0f);
     }
 
+    // The colour alpha channel carries material metadata, not coverage.  Use
+    // the frame-local mask before decoding that metadata so BASIC SSAO cannot
+    // treat a vanilla pixel (or a stale colour value) as LoD geometry.
+    if (texture(lodMaskTex, view.xy).r <= 0.5f) {
+        return vec4(-1.0f);
+    }
     uint meta = uint(255.0f*texture(colourTex, view.xy).w);
     if ((meta>>6)==0) {
         return vec4(-1.0f);
@@ -200,7 +209,8 @@ float computeAO(vec3 uvDepth, vec3 worldNorm)
         }
         vec3 offset_view;// = rev3d(invProj, vec3(sample_uv, depth));
         vec4 sampleColour = texture(colourTex, sample_uv);
-        if (sampleColour.a == 0.0f) {//No Voxy colour: use the vanilla depth.
+        bool sampleHasLod = texture(lodMaskTex, sample_uv).r > 0.5f;
+        if (!sampleHasLod) {//No LoD coverage: use the vanilla depth.
             float sourceDepth = texture(sourceDepthTex, sample_uv).x;
             if (sourceDepth == FAR) {
                 continue;
@@ -260,11 +270,10 @@ void main() {
     float depth = texture(depthTex, point).r;
     vec4 ocolour = vec4(0);
     vec4 colour = texture(colourTex, point);
-    // The private colour target is transparent for pixels occupied by vanilla
-    // terrain (or by the sky). Do not manufacture a debug colour for those
-    // pixels: doing so turns a valid vanilla depth sample into stale/garbled
-    // LoD colour during the final composite.
-    if (depth!=FAR && colour.a > 0.0f) {
+    // The mask is cleared before every frame and is written only by a LoD
+    // fragment that survives depth/stencil tests. Do not infer coverage from
+    // colour alpha: alpha is a material value and can legitimately vary.
+    if (depth!=FAR && texture(lodMaskTex, point).r > 0.5f) {
         uint metadata = uint(colour.w*255.0f);
         uint face = metadata&7u;
         uint lod = (metadata>>3)&7u;

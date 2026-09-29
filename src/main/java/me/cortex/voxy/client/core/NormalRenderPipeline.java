@@ -44,6 +44,7 @@ import static org.lwjgl.opengl.GL45C.glTextureParameterf;
 
 public class NormalRenderPipeline extends AbstractRenderPipeline {
     private GlTexture colourTex;
+    private GlTexture lodMaskTex;
     private GlTexture colourSSAOTex;
     private final GlFramebuffer fbSSAO = new GlFramebuffer();
 
@@ -67,19 +68,30 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
         if (this.colourTex == null || this.colourTex.getHeight() != viewport.height || this.colourTex.getWidth() != viewport.width) {
             if (this.colourTex != null) {
                 this.colourTex.free();
+                this.lodMaskTex.free();
                 this.colourSSAOTex.free();
             }
             this.fb.resize(viewport.width, viewport.height);
 
             this.colourTex = new GlTexture().store(GL_RGBA8, 1, viewport.width, viewport.height);
+            this.lodMaskTex = new GlTexture().store(GL_R32F, 1, viewport.width, viewport.height);
             this.colourSSAOTex = new GlTexture().store(GL_RGBA8, 1, viewport.width, viewport.height);
 
-            this.fb.framebuffer.bind(GL_COLOR_ATTACHMENT0, this.colourTex).verify();
-            this.fbSSAO.bind(this.fb.getDepthAttachmentType(), this.fb.getDepthTex()).bind(GL_COLOR_ATTACHMENT0, this.colourSSAOTex).verify();
+            this.fb.framebuffer
+                    .bind(GL_COLOR_ATTACHMENT0, this.colourTex)
+                    .bind(GL_COLOR_ATTACHMENT1, this.lodMaskTex)
+                    .setDrawBuffers(GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1)
+                    .verify();
+            this.fbSSAO.bind(this.fb.getDepthAttachmentType(), this.fb.getDepthTex())
+                    .bind(GL_COLOR_ATTACHMENT0, this.colourSSAOTex)
+                    .setDrawBuffers(GL_COLOR_ATTACHMENT0)
+                    .verify();
 
 
             glTextureParameterf(this.colourTex.id, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTextureParameterf(this.colourTex.id, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTextureParameterf(this.lodMaskTex.id, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTextureParameterf(this.lodMaskTex.id, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glTextureParameterf(this.colourSSAOTex.id, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTextureParameterf(this.colourSSAOTex.id, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glTextureParameterf(this.fb.getDepthTex().id, GL_DEPTH_STENCIL_TEXTURE_MODE, GL_DEPTH_COMPONENT);
@@ -93,6 +105,7 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
             var clearColour = stack.mallocFloat(4);
             clearColour.put(0.0f).put(0.0f).put(0.0f).put(0.0f).flip();
             glClearNamedFramebufferfv(this.fb.framebuffer.id, GL_COLOR, 0, clearColour);
+            glClearNamedFramebufferfv(this.fb.framebuffer.id, GL_COLOR, 1, clearColour);
         }
 
         this.initDepthStencil(viewport, sourceFB, this.fb.framebuffer.id, viewport.width, viewport.height, viewport.width, viewport.height);
@@ -103,7 +116,7 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
     @Override
     protected void postOpaquePreTranslucent(Viewport<?> viewport, int sourceFrameBuffer) {
         GPUTiming.INSTANCE.marker("ao");
-        this.ssao.computeSSAO(viewport, this.colourSSAOTex, this.colourTex, this.fb.getDepthTex(), sourceFrameBuffer);
+        this.ssao.computeSSAO(viewport, this.colourSSAOTex, this.colourTex, this.lodMaskTex, this.fb.getDepthTex(), sourceFrameBuffer);
         // SSAO writes colourSSAOTex through an image binding.  The next pass
         // either blends into it as a framebuffer or samples it in finalBlit;
         // make both consumers observe the completed compute writes instead of
@@ -172,6 +185,7 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
         this.fbSSAO.free();
         if (this.colourTex != null) {
             this.colourTex.free();
+            this.lodMaskTex.free();
             this.colourSSAOTex.free();
         }
         super.free0();

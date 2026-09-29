@@ -10,6 +10,12 @@
 #endif
 
 layout(binding = 0) uniform sampler2D blockModelAtlas;
+// The normal pipeline attaches a separate R32F coverage target at location 1.
+// Shader-pack patched variants do not declare this output and keep their own
+// render-target layout.
+#ifndef PATCHED_SHADER
+layout(binding = 2) uniform sampler2D depthTex;
+#endif
 
 //#define DEBUG_RENDER
 
@@ -28,6 +34,7 @@ layout(location = 7) in flat uint quadDebug;
 
 #ifndef PATCHED_SHADER
 layout(location = 0) out vec4 outColour;
+layout(location = 1) out float outLodMask;
 #else
 
 //Bind the model buffer and import the model system as we need it
@@ -155,6 +162,16 @@ void main() {
         return;
     }
 
+    // ChunkBoundRenderer supplies a conservative depth bound only for the
+    // outer transition band. Keep LoD behind loaded vanilla sections there;
+    // the framebuffer stencil still provides the exact per-pixel near mask.
+    #ifndef PATCHED_SHADER
+    if (DEPTH_SCALAR_COMPARE(gl_FragCoord.z, texelFetch(depthTex, ivec2(gl_FragCoord.xy), 0).r)) {
+        discard;
+        return;
+    }
+    #endif
+
     //Also, small quad is really fking over the mipping level somehow
     #ifndef TRANSLUCENT
     colour.a = 1.0f;
@@ -180,6 +197,7 @@ void main() {
     #ifndef PATCHED_SHADER
     colour = computeColour(texPos, colour);
     outColour = colour;
+    outLodMask = 1.0f;
 
     #ifdef DEBUG_RENDER
     uint hash = quadDebug*1231421+123141;
