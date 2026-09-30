@@ -12,6 +12,7 @@ import me.cortex.voxy.common.voxelization.WorldConversionFactory;
 import me.cortex.voxy.common.voxelization.WorldVoxilizedSectionMipper;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldUpdater;
+import me.cortex.voxy.common.world.other.BlockAppearance;
 import net.minecraft.core.Holder;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
@@ -490,7 +491,7 @@ public class WorldImporter implements IDataImporter {
                 Logger.error("Chunk position is not located in correct region, expected: (" + regionX + ", " + regionZ+"), got: " + "(" + (x>>5) + ", " + (z>>5)+"), importing anyway");
             }
 
-            Map<Integer, BlockState[]> materialStates = readCopycatMaterials(chunk);
+            Map<Integer, BlockAppearance[]> materialStates = readCopycatMaterials(chunk);
             for (var sectionE : chunk.getList("sections", Tag.TAG_COMPOUND)) {
                 var section = (CompoundTag) sectionE;
                 int y = section.getInt("Y");
@@ -505,33 +506,55 @@ public class WorldImporter implements IDataImporter {
 
     private static final byte[] EMPTY = new byte[0];
     private static final ThreadLocal<VoxelizedSection> SECTION_CACHE = ThreadLocal.withInitial(VoxelizedSection::createEmpty);
-    private static Map<Integer, BlockState[]> readCopycatMaterials(CompoundTag chunk) {
-        Map<Integer, BlockState[]> result = new HashMap<>();
+    private static Map<Integer, BlockAppearance[]> readCopycatMaterials(CompoundTag chunk) {
+        Map<Integer, BlockAppearance[]> result = new HashMap<>();
         if (!chunk.contains("block_entities")) {
             return result;
         }
         for (var entityTag : chunk.getList("block_entities", Tag.TAG_COMPOUND)) {
             CompoundTag entity = (CompoundTag) entityTag;
             String id = entity.getString("id").toLowerCase(java.util.Locale.ROOT);
-            if (!id.contains("copycat")) continue;
-            CompoundTag materialTag = entity.contains("Material")
-                    ? entity.getCompound("Material")
-                    : entity.getCompound("material");
-            if (materialTag.isEmpty()) continue;
-            var materialResult = BlockState.CODEC.parse(NbtOps.INSTANCE, materialTag);
-            if (materialResult.result().isEmpty()) continue;
+            if (!id.contains("copycat") && !entity.contains("material_data")) continue;
+
+            Map<String, BlockState> materials = new HashMap<>();
+            Map<String, Boolean> connectedTextures = new HashMap<>();
+            if (entity.contains("material_data")) {
+                CompoundTag materialData = entity.getCompound("material_data");
+                for (String property : materialData.getAllKeys()) {
+                    CompoundTag part = materialData.getCompound(property);
+                    if (!part.contains("material")) continue;
+                    var materialResult = BlockState.CODEC.parse(NbtOps.INSTANCE, part.getCompound("material"));
+                    materialResult.result().ifPresent(material -> materials.put(property, material));
+                    if (part.contains("enableCT")) {
+                        connectedTextures.put(property, part.getBoolean("enableCT"));
+                    }
+                }
+            }
+
+            // Create and older Copycats builds use a single top-level state.
+            if (materials.isEmpty()) {
+                CompoundTag materialTag = entity.contains("Material")
+                        ? entity.getCompound("Material")
+                        : entity.getCompound("material");
+                if (!materialTag.isEmpty()) {
+                    var materialResult = BlockState.CODEC.parse(NbtOps.INSTANCE, materialTag);
+                    materialResult.result().ifPresent(material -> materials.put("material", material));
+                }
+            }
+            BlockAppearance appearance = BlockAppearance.of(materials, connectedTextures);
+            if (appearance == null) continue;
 
             int blockX = entity.getInt("x") & 15;
             int blockY = entity.getInt("y");
             int blockZ = entity.getInt("z") & 15;
             int sectionY = blockY >> 4;
-            BlockState[] sectionMaterials = result.computeIfAbsent(sectionY, ignored -> new BlockState[16 * 16 * 16]);
-            sectionMaterials[blockX | (blockZ << 4) | ((blockY & 15) << 8)] = materialResult.result().get();
+            BlockAppearance[] sectionMaterials = result.computeIfAbsent(sectionY, ignored -> new BlockAppearance[16 * 16 * 16]);
+            sectionMaterials[blockX | (blockZ << 4) | ((blockY & 15) << 8)] = appearance;
         }
         return result;
     }
 
-    private void importSectionNBT(int x, int y, int z, CompoundTag section, @Nullable BlockState[] materialStates) {
+    private void importSectionNBT(int x, int y, int z, CompoundTag section, @Nullable BlockAppearance[] materialStates) {
         if (section.getCompound("block_states").isEmpty()) {
             return;
         }

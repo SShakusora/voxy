@@ -2,6 +2,7 @@ package me.cortex.voxy.common.voxelization;
 
 import it.unimi.dsi.fastutil.objects.Reference2IntOpenHashMap;
 import me.cortex.voxy.common.world.other.Mapper;
+import me.cortex.voxy.common.world.other.BlockAppearance;
 import me.cortex.voxy.common.world.other.Mipper;
 import net.caffeinemc.mods.lithium.common.world.chunk.LithiumHashPalette;
 import me.cortex.voxy.commonImpl.VoxyCommon;
@@ -128,7 +129,7 @@ public class WorldConversionFactory {
                                            PalettedContainer<BlockState> blockContainer,
                                            PalettedContainerRO<Holder<Biome>> biomeContainer,
                                            ILightingSupplier lightSupplier,
-                                           BlockState[] materialStates) {
+                                           BlockAppearance[] materialStates) {
         return convert(section, stateMapper, blockContainer, biomeContainer, lightSupplier, materialStates, false, 0);
     }
 
@@ -147,7 +148,7 @@ public class WorldConversionFactory {
                                            PalettedContainer<BlockState> blockContainer,
                                            PalettedContainerRO<Holder<Biome>> biomeContainer,
                                            ILightingSupplier lightSupplier,
-                                           BlockState[] materialStates,
+                                           BlockAppearance[] materialStates,
                                            boolean shouldZoom,
                                            long zoomSeed) {
         //Cheat by creating a local pallet then read the data directly

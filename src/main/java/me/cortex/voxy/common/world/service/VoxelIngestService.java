@@ -9,6 +9,7 @@ import me.cortex.voxy.common.voxelization.WorldConversionFactory;
 import me.cortex.voxy.common.voxelization.WorldVoxilizedSectionMipper;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldUpdater;
+import me.cortex.voxy.common.world.other.BlockAppearance;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import net.minecraft.core.BlockPos;
@@ -28,6 +29,8 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
 public class VoxelIngestService {
@@ -36,7 +39,7 @@ public class VoxelIngestService {
     private record IngestSection(int cx, int cy, int cz, WorldEngine world,
                                  PalettedContainer<BlockState> states,
                                  PalettedContainerRO<Holder<Biome>> biomes,
-                                 @Nullable BlockState[] materialStates,
+                                 @Nullable BlockAppearance[] materialStates,
                                  boolean onlyAir,
                                  DataLayer blockLight, DataLayer skyLight){}
     private final ConcurrentLinkedDeque<IngestSection> ingestQueue = new ConcurrentLinkedDeque<>();
@@ -91,40 +94,96 @@ public class VoxelIngestService {
     }
 
     /**
-     * Copycat material is block-entity state, not part of the section palette.
-     * Capture it on the client thread before handing the section to the ingest
-     * worker. Reflection keeps the common code independent of Create and also
-     * works with Copycats+ implementations exposing the same getMaterial API.
+     * Copycat appearance is block-entity state, not part of the section
+     * palette. Capture it on the client thread before handing the section to
+     * the ingest worker. Reflection keeps the common code independent of
+     * Create/Copycats+ and preserves both single and named multi-state parts.
      */
     @Nullable
-    private static BlockState[] snapshotMaterialStates(LevelChunk chunk, int sectionY) {
-        BlockState[] materials = null;
+    private static BlockAppearance[] snapshotMaterialStates(LevelChunk chunk, int sectionY) {
+        BlockAppearance[] materials = null;
         for (var entry : chunk.getBlockEntities().entrySet()) {
             BlockPos pos = entry.getKey();
             if ((pos.getY() >> 4) != sectionY) continue;
-            BlockState material = getCopycatMaterial(entry.getValue());
-            if (material == null) continue;
-            if (materials == null) materials = new BlockState[16 * 16 * 16];
+            BlockAppearance appearance = getCopycatAppearance(entry.getValue());
+            if (appearance == null) continue;
+            if (materials == null) materials = new BlockAppearance[16 * 16 * 16];
             int x = pos.getX() & 15;
             int y = pos.getY() & 15;
             int z = pos.getZ() & 15;
-            materials[x | (z << 4) | (y << 8)] = material;
+            materials[x | (z << 4) | (y << 8)] = appearance;
         }
         return materials;
     }
 
     @Nullable
-    private static BlockState getCopycatMaterial(BlockEntity blockEntity) {
+    private static BlockAppearance getCopycatAppearance(BlockEntity blockEntity) {
         if (!blockEntity.getClass().getName().toLowerCase(java.util.Locale.ROOT).contains("copycat")) {
             return null;
         }
         try {
+            for (String methodName : new String[]{"getMaterialMap", "getMaterials"}) {
+                try {
+                    Object rawMaterials = blockEntity.getClass().getMethod(methodName).invoke(blockEntity);
+                    BlockAppearance appearance = appearanceFromMaterialMap(rawMaterials, Map.of());
+                    if (appearance != null) return appearance;
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                    // Try the storage-backed protocol below.
+                }
+            }
+            // Copycats+ multi-state entities expose a MaterialItemStorage whose
+            // material map is exactly the ModelData map expected by their model.
+            Method storageMethod = blockEntity.getClass().getMethod("getMaterialItemStorage");
+            Object storage = storageMethod.invoke(blockEntity);
+            if (storage != null) {
+                Object rawMaterials = storage.getClass().getMethod("getMaterialMap").invoke(storage);
+                if (rawMaterials instanceof Map<?, ?> rawMap && !rawMap.isEmpty()) {
+                    Map<String, BlockState> materials = new HashMap<>();
+                    Map<String, Boolean> connectedTextures = new HashMap<>();
+                    Method itemMethod = storage.getClass().getMethod("getMaterialItem", String.class);
+                    for (var materialEntry : rawMap.entrySet()) {
+                        if (!(materialEntry.getValue() instanceof BlockState material)) continue;
+                        String property = String.valueOf(materialEntry.getKey());
+                        materials.put(property, material);
+                        Object item = itemMethod.invoke(storage, property);
+                        if (item != null) {
+                            try {
+                                Object enableCT = item.getClass().getMethod("enableCT").invoke(item);
+                                if (enableCT instanceof Boolean value) {
+                                    connectedTextures.put(property, value);
+                                }
+                            } catch (ReflectiveOperationException ignored) {
+                                // Older Copycats+ builds did not expose CT per part.
+                            }
+                        }
+                    }
+                    BlockAppearance appearance = BlockAppearance.of(materials, connectedTextures);
+                    if (appearance != null) return appearance;
+                }
+            }
             Method method = blockEntity.getClass().getMethod("getMaterial");
             Object material = method.invoke(blockEntity);
-            return material instanceof BlockState state ? state : null;
+            return material instanceof BlockState state ? BlockAppearance.single(state) : null;
         } catch (ReflectiveOperationException | RuntimeException ignored) {
-            return null;
+            try {
+                Method method = blockEntity.getClass().getMethod("getMaterial");
+                Object material = method.invoke(blockEntity);
+                return material instanceof BlockState state ? BlockAppearance.single(state) : null;
+            } catch (ReflectiveOperationException | RuntimeException ignoredAgain) {
+                return null;
+            }
         }
+    }
+
+    private static BlockAppearance appearanceFromMaterialMap(Object rawMaterials, Map<String, Boolean> connectedTextures) {
+        if (!(rawMaterials instanceof Map<?, ?> rawMap) || rawMap.isEmpty()) return null;
+        Map<String, BlockState> materials = new HashMap<>();
+        for (var entry : rawMap.entrySet()) {
+            if (entry.getValue() instanceof BlockState state) {
+                materials.put(String.valueOf(entry.getKey()), state);
+            }
+        }
+        return BlockAppearance.of(materials, connectedTextures);
     }
 
     @NotNull

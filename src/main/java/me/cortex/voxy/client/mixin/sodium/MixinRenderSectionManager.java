@@ -111,13 +111,7 @@ public class MixinRenderSectionManager {
         boolean wasBuilt = instance.getFlags() != 0;
         int flags = instance.getFlags();
         instance.setInfo(info);
-        if (wasBuilt == (instance.getFlags() != 0)) { // Only want to do stuff on change
-            //? if 1.21.1 {
-            return true;
-            //? } else {
-            return;
-            //? }
-        }
+        boolean buildStateChanged = wasBuilt != (instance.getFlags() != 0);
 
         flags |= instance.getFlags();
         if (flags == 0) // Only process things with stuff
@@ -165,6 +159,18 @@ public class MixinRenderSectionManager {
                     VoxelIngestService.rawIngest(system.getEngine(), chunk, section, x, y, z, blp == null ? null : blp.copy(), slp == null ? null : slp.copy());
                 }
             }
+        }
+
+        // Block-entity material changes rebuild an already non-empty Sodium
+        // section.  The old early return treated that as a no-op, leaving the
+        // LoD with the previous Copycat appearance.  Ingest first, then keep
+        // the normal bound-renderer transition logic below unchanged.
+        if (!buildStateChanged) {
+            //? if 1.21.1 {
+            return true;
+            //? } else {
+            return;
+            //? }
         }
 
         //Do some very cheeky stuff for MiB

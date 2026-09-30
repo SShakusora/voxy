@@ -7,6 +7,7 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 
 import me.cortex.voxy.client.core.model.ModelFactory;
 import me.cortex.voxy.common.util.UnsafeUtil;
+import me.cortex.voxy.common.world.other.BlockAppearance;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ItemBlockRenderTypes;
 import net.minecraft.client.renderer.RenderType;
@@ -43,6 +44,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -102,7 +104,7 @@ public class SoftwareModelTextureBakery {
         this.rasterizer.setSamplerTexture(pixels, width, height);
     }
 
-    private void bakeBlockModel(BlockState state, @Nullable BlockState materialState, RenderType fallbackLayer) {
+    private void bakeBlockModel(BlockState state, @Nullable BlockAppearance appearance, RenderType fallbackLayer) {
         if (state.getRenderShape() == RenderShape.INVISIBLE) {
             return;// Dont bake if invisible
         }
@@ -116,18 +118,26 @@ public class SoftwareModelTextureBakery {
         // model).  The old three-argument call deliberately remains the
         // Fabric/vanilla path.
         //? if forge {
-        ModelData modelData = createForgeModelData(model, state, materialState);
+        ModelData modelData = createForgeModelData(model, state, appearance);
         SingleThreadedRandomSource random = new SingleThreadedRandomSource(42L);
         List<RenderType> renderTypes = new ArrayList<>();
-        // CopycatModel inherits the default render-type lookup from the
-        // wrapper state, while its getQuads() validates against the material
-        // model.  Query the material model here so glass/cutout materials do
-        // not fall back to Copycat's blank base model.
-        var renderTypeModel = materialState == null ? model : Minecraft.getInstance()
-                .getModelManager().getBlockModelShaper().getBlockModel(materialState);
-        var renderTypeState = materialState == null ? state : materialState;
-        for (RenderType type : renderTypeModel.getRenderTypes(renderTypeState, random, ModelData.EMPTY)) {
-            renderTypes.add(type);
+        // Copycat wrappers compute the union of all part render types from the
+        // same ModelData that is later passed to getQuads.  This matters for a
+        // Copycats+ block containing, for example, both glass and stone parts.
+        try {
+            for (RenderType type : model.getRenderTypes(state, random, modelData)) {
+                renderTypes.add(type);
+            }
+        } catch (RuntimeException ignored) {
+            // Some older Forge models do not implement the extended query.
+        }
+        if (renderTypes.isEmpty() && appearance != null) {
+            for (BlockState material : appearance.materials().values()) {
+                var materialModel = Minecraft.getInstance().getModelManager().getBlockModelShaper().getBlockModel(material);
+                for (RenderType type : materialModel.getRenderTypes(material, random, ModelData.EMPTY)) {
+                    renderTypes.add(type);
+                }
+            }
         }
         if (renderTypes.isEmpty()) {
             renderTypes.add(fallbackLayer);
@@ -139,7 +149,7 @@ public class SoftwareModelTextureBakery {
                 var quads = model.getQuads(state, direction, random, modelData, layer);
                 for (var quad : quads) {
                     (layer == RenderType.translucent() ? this.translucentVC : this.opaqueVC)
-                            .quad(quad, (materialState != null ? materialState : state).is(BlockTags.LEAVES), layer);
+                            .quad(quad, isLeafMaterial(quad, appearance, state), layer);
                 }
             }
         }
@@ -160,21 +170,146 @@ public class SoftwareModelTextureBakery {
     // common-source dependency on Create.
     //? if forge {
     @SuppressWarnings({"rawtypes", "unchecked"})
-    private static ModelData createForgeModelData(BakedModel model, BlockState state, @Nullable BlockState materialState) {
-        if (materialState == null) {
+    private static ModelData createForgeModelData(BakedModel model, BlockState state, @Nullable BlockAppearance appearance) {
+        if (appearance == null || appearance.isEmpty()) {
             return ModelData.EMPTY;
         }
         try {
-            Class<?> copycatModel = Class.forName("com.simibubi.create.content.decoration.copycat.CopycatModel");
-            java.lang.reflect.Field field = copycatModel.getField("MATERIAL_PROPERTY");
-            ModelProperty property = (ModelProperty) field.get(null);
-            ModelData initial = ModelData.builder().with(property, materialState).build();
+            ModelData.Builder builder = ModelData.builder();
+            boolean injected = false;
+            Class<?> type = model.getClass();
+            while (type != null && type != Object.class) {
+                for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                    if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                    String fieldName = field.getName();
+                    if (!fieldName.equals("MATERIALS_PROPERTY") && !fieldName.equals("MATERIAL_PROPERTY")) continue;
+                    if (!field.canAccess(null) && !field.trySetAccessible()) continue;
+                    if (!(field.get(null) instanceof ModelProperty property)) continue;
+                    if (fieldName.equals("MATERIALS_PROPERTY")) {
+                        builder.with(property, appearance.materials());
+                        injected = true;
+                    } else if (fieldName.equals("MATERIAL_PROPERTY")) {
+                        BlockState material = appearance.primaryMaterial();
+                        if (material != null) {
+                            builder.with(property, material);
+                            injected = true;
+                        }
+                    }
+                }
+                type = type.getSuperclass();
+            }
+            // A wrapper may hide its property class behind a generated model
+            // implementation.  These optional lookups keep the dependency
+            // soft while covering Create and Copycats+ Forge 1.20.1 builds.
+            injected |= injectOptionalProperty(builder, "com.simibubi.create.content.decoration.copycat.CopycatModel", "MATERIAL_PROPERTY", appearance.primaryMaterial());
+            injected |= injectOptionalProperty(builder, "com.copycatsplus.copycats.foundation.copycat.model.forge.CopycatModelForge", "MATERIALS_PROPERTY", appearance.materials());
+            if (!injected) return ModelData.EMPTY;
+            ModelData initial = builder.build();
             // CopycatModel uses getModelData() to add wrapped material data and
             // its occlusion mask.  Keep model-data evaluation deterministic by
             // using a stable one-block view instead of touching the live world.
-            return model.getModelData(new SingleBlockModelWorld(state), BlockPos.ZERO, state, initial);
+            SingleBlockModelWorld world = new SingleBlockModelWorld(state);
+            ModelData generated = model.getModelData(world, BlockPos.ZERO, state, initial);
+            return applyCopycatsConnectedTextureData(model, state, appearance, world, generated);
         } catch (ReflectiveOperationException | LinkageError | RuntimeException ignored) {
             return ModelData.EMPTY;
+        }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static boolean injectOptionalProperty(ModelData.Builder builder, String className, String fieldName, Object value) {
+        if (value == null) return false;
+        try {
+            java.lang.reflect.Field field = Class.forName(className).getField(fieldName);
+            if (!(field.get(null) instanceof ModelProperty property)) return false;
+            builder.with(property, value);
+            return true;
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isLeafMaterial(net.minecraft.client.renderer.block.model.BakedQuad quad,
+                                          @Nullable BlockAppearance appearance, BlockState fallback) {
+        if (appearance == null) return fallback.is(BlockTags.LEAVES);
+        BlockState material = materialForQuad(quad, appearance);
+        return material == null ? fallback.is(BlockTags.LEAVES) : material.is(BlockTags.LEAVES);
+    }
+
+    @Nullable
+    private static BlockState materialForQuad(net.minecraft.client.renderer.block.model.BakedQuad quad,
+                                              BlockAppearance appearance) {
+        try {
+            java.lang.reflect.Field property = quad.getClass().getField("property");
+            Object key = property.get(quad);
+            if (key != null) {
+                BlockState material = appearance.materials().get(String.valueOf(key));
+                if (material != null) return material;
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // Vanilla/Create quads do not carry a named Copycats+ part.
+        }
+        return appearance.primaryMaterial();
+    }
+
+    /**
+     * Copycats+ reads the CT flag from its live block entity while building the
+     * wrapped ModelData.  The LoD baker intentionally has no live entity, so
+     * rebuild the wrapped material data against a deterministic one-block view
+     * and apply the snapshotted per-part CT flags through the public model
+     * interfaces.  All references stay reflective so Copycats+ remains an
+     * optional dependency.
+     */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static ModelData applyCopycatsConnectedTextureData(BakedModel model, BlockState state,
+                                                                BlockAppearance appearance, SingleBlockModelWorld world,
+                                                                ModelData generated) {
+        if (appearance.connectedTextures().isEmpty()) return generated;
+        try {
+            Class<?> multiStateClass = Class.forName("com.copycatsplus.copycats.foundation.copycat.multistate.IMultiStateCopycatBlock");
+            if (!multiStateClass.isInstance(state.getBlock())) return generated;
+
+            Class<?> modelClass = Class.forName("com.copycatsplus.copycats.foundation.copycat.model.forge.CopycatModelForge");
+            java.lang.reflect.Field wrappedField = modelClass.getDeclaredField("WRAPPED_DATA_PROPERTY");
+            if (!wrappedField.trySetAccessible()) return generated;
+            Object wrappedPropertyValue = wrappedField.get(null);
+            if (!(wrappedPropertyValue instanceof ModelProperty wrappedProperty)) return generated;
+
+            Class<?> scaledClass = Class.forName("com.copycatsplus.copycats.foundation.copycat.model.forge.ScaledBlockAndTintGetterForge");
+            Class<?> filteredClass = Class.forName("com.copycatsplus.copycats.foundation.copycat.model.forge.FilteredBlockAndTintGetterForge");
+            var scaledConstructor = scaledClass.getConstructor(String.class, BlockAndTintGetter.class, BlockPos.class,
+                    net.minecraft.core.Vec3i.class, net.minecraft.core.Vec3i.class, java.util.function.Predicate.class);
+            var filteredConstructor = filteredClass.getConstructor(BlockAndTintGetter.class, java.util.function.Predicate.class);
+            var vectorMethod = multiStateClass.getMethod("getVectorFromProperty", BlockState.class, String.class);
+            var scaleMethod = multiStateClass.getMethod("vectorScale", BlockState.class);
+            var connectMethod = multiStateClass.getMethod("canConnectTexturesToward", String.class,
+                    BlockAndTintGetter.class, BlockPos.class, BlockPos.class, BlockState.class);
+
+            Map<String, ModelData> wrappedData = new java.util.HashMap<>();
+            for (var entry : appearance.materials().entrySet()) {
+                String property = entry.getKey();
+                Object inner = vectorMethod.invoke(state.getBlock(), state, property);
+                Object scale = scaleMethod.invoke(state.getBlock(), state);
+                Object scaledWorld = scaledConstructor.newInstance(property, world, BlockPos.ZERO, inner, scale,
+                        (java.util.function.Predicate<BlockPos>) target -> true);
+                java.util.function.Predicate<BlockPos> filter = target -> {
+                    if (!appearance.enableConnectedTextures(property)) return false;
+                    try {
+                        return Boolean.TRUE.equals(connectMethod.invoke(state.getBlock(), property, scaledWorld,
+                                BlockPos.ZERO, target, state));
+                    } catch (ReflectiveOperationException | RuntimeException ignored) {
+                        return true;
+                    }
+                };
+                Object filteredWorld = filteredConstructor.newInstance(scaledWorld, filter);
+                BakedModel materialModel = Minecraft.getInstance().getModelManager().getBlockModelShaper().getBlockModel(entry.getValue());
+                ModelData materialData = materialModel.getModelData((BlockAndTintGetter) filteredWorld,
+                        BlockPos.ZERO, entry.getValue(), ModelData.EMPTY);
+                wrappedData.put(property, materialData);
+            }
+            return generated.derive().with(wrappedProperty, wrappedData).build();
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException ignored) {
+            return generated;
         }
     }
 
@@ -334,7 +469,7 @@ public class SoftwareModelTextureBakery {
         return this.renderToOutput(state, null, outputBuffer);
     }
 
-    public int renderToOutput(BlockState state, @Nullable BlockState materialState, long outputBuffer) {
+    public int renderToOutput(BlockState state, @Nullable BlockAppearance appearance, long outputBuffer) {
         MemoryUtil.memSet(outputBuffer, 0, 16 * 16 * 8 * 6);
 
         boolean isBlock = true;
@@ -343,7 +478,8 @@ public class SoftwareModelTextureBakery {
         }
 
         RenderType blockRenderLayer = null;
-        BlockState renderState = materialState == null ? state : materialState;
+        BlockState renderState = appearance == null || appearance.primaryMaterial() == null
+                ? state : appearance.primaryMaterial();
         if (state.getBlock() instanceof LiquidBlock) {
             blockRenderLayer = ItemBlockRenderTypes.getRenderLayer(state.getFluidState());
         } else {
@@ -367,7 +503,7 @@ public class SoftwareModelTextureBakery {
         if (isBlock) {
             this.opaqueVC.reset();
             this.translucentVC.reset();
-            this.bakeBlockModel(state, materialState, blockRenderLayer);
+            this.bakeBlockModel(state, appearance, blockRenderLayer);
             isAnyShaded |= this.opaqueVC.anyShaded | this.translucentVC.anyShaded;
             isAnyDarkend |= this.opaqueVC.anyDarkendTex | this.translucentVC.anyDarkendTex;
             anyTranslucent |= !this.translucentVC.isEmpty();

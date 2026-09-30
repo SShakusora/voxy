@@ -52,12 +52,8 @@ public class Mapper {
     public static final long AIR = 0;
 
     private final ReentrantLock blockLock = new ReentrantLock();
-    /**
-     * A block's render appearance is not always completely described by its
-     * BlockState.  Forge models such as Create's Copycats keep the material in
-     * a block entity, so the material state is part of the mapping key too.
-     */
-    private record StateKey(BlockState state, @Nullable BlockState materialState) {}
+    /** A block entity can contribute one or more named material states. */
+    private record StateKey(BlockState state, @Nullable BlockAppearance appearance) {}
 
     private final ConcurrentHashMap<StateKey, StateEntry> block2stateEntry = new ConcurrentHashMap<>(2000,0.75f, 10);
     private final ObjectArrayList<StateEntry> blockId2stateEntry = new ObjectArrayList<>();
@@ -72,7 +68,7 @@ public class Mapper {
     public Mapper(IMappingStorage storage) {
         this.storage = storage;
         //Insert air since its a special entry (index 0)
-        var airEntry = new StateEntry(0, Blocks.AIR.defaultBlockState(), null);
+        var airEntry = new StateEntry(0, Blocks.AIR.defaultBlockState(), (BlockAppearance) null);
         this.block2stateEntry.put(new StateKey(airEntry.state, null), airEntry);
         this.blockId2stateEntry.add(airEntry);
 
@@ -139,7 +135,7 @@ public class Mapper {
                     continue;
                 }
                 sentries.add(sentry);
-                var oldEntry = this.block2stateEntry.putIfAbsent(new StateKey(sentry.state, sentry.materialState), sentry);
+                var oldEntry = this.block2stateEntry.putIfAbsent(new StateKey(sentry.state, sentry.appearance), sentry);
                 if (oldEntry != null) {
                     //forceResave[0] |= true;
                     Logger.warn("Multiple mappings for blockstate, using old state, expect things to possibly go really badly. " + oldEntry.id + ":" + sentry.id + ":" + sentry.state );
@@ -162,7 +158,7 @@ public class Mapper {
             for (var error : sentryErrors) {
                 while (true) {
                     var state = new StateEntry(error.right(), Block.BLOCK_STATE_REGISTRY.byId(rand.nextInt(Block.BLOCK_STATE_REGISTRY.size() - 1)));
-                    if (this.block2stateEntry.put(new StateKey(state.state, state.materialState), state) == null) {
+                    if (this.block2stateEntry.put(new StateKey(state.state, state.appearance), state) == null) {
                         sentries.add(state);
                         break;
                     }
@@ -195,16 +191,16 @@ public class Mapper {
         return this.blockId2stateEntry.size();
     }
 
-    private StateEntry registerNewBlockState(BlockState state, @Nullable BlockState materialState) {
+    private StateEntry registerNewBlockState(BlockState state, @Nullable BlockAppearance appearance) {
         this.blockLock.lock();
-        var key = new StateKey(state, materialState);
+        var key = new StateKey(state, appearance);
         var entry = this.block2stateEntry.get(key);
         if (entry != null) {
             this.blockLock.unlock();
             return entry;
         }
 
-        entry = new StateEntry(this.blockId2stateEntry.size(), state, materialState);
+        entry = new StateEntry(this.blockId2stateEntry.size(), state, appearance);
         this.blockId2stateEntry.add(entry);
         this.block2stateEntry.put(key, entry);
         this.blockLock.unlock();
@@ -257,28 +253,34 @@ public class Mapper {
     }
 
     public int getIdForBlockState(BlockState state) {
-        return this.getIdForBlockAppearance(state, null);
+        return this.getIdForBlockAppearance(state, (BlockAppearance) null);
     }
 
-    /**
-     * Returns the persistent ID for a block state and its optional visual
-     * material.  A null material preserves the old, ordinary BlockState-only
-     * mapping behaviour.
-     */
-    public int getIdForBlockAppearance(BlockState state, @Nullable BlockState materialState) {
+    /** Returns the persistent ID for a block state and its optional appearance. */
+    public int getIdForBlockAppearance(BlockState state, @Nullable BlockAppearance appearance) {
         if (state.isAir()) {
             return 0;
         }
-        var mapping = this.block2stateEntry.get(new StateKey(state, materialState));
+        var mapping = this.block2stateEntry.get(new StateKey(state, appearance));
         if (mapping == null) {
-            mapping = this.registerNewBlockState(state, materialState);
+            mapping = this.registerNewBlockState(state, appearance);
         }
         return mapping.id;
+    }
+
+    /** Compatibility overload for callers that only have one copied material. */
+    public int getIdForBlockAppearance(BlockState state, @Nullable BlockState materialState) {
+        return this.getIdForBlockAppearance(state, materialState == null ? null : BlockAppearance.single(materialState));
     }
 
     @Nullable
     public BlockState getMaterialStateFromBlockId(int blockId) {
         return this.blockId2stateEntry.get(blockId).materialState;
+    }
+
+    @Nullable
+    public BlockAppearance getAppearanceFromBlockId(int blockId) {
+        return this.blockId2stateEntry.get(blockId).appearance;
     }
 
     public int getBlockStateOpacity(long mappingId) {
@@ -382,17 +384,25 @@ public class Mapper {
         public final int id;
         public final BlockState state;
         @Nullable
+        public final BlockAppearance appearance;
+        /** Kept as a compatibility view for old model code and old mappings. */
+        @Nullable
         public final BlockState materialState;
         public final int opacity;
 
         public StateEntry(int id, BlockState state) {
-            this(id, state, null);
+            this(id, state, (BlockAppearance) null);
         }
 
         public StateEntry(int id, BlockState state, @Nullable BlockState materialState) {
+            this(id, state, materialState == null ? null : BlockAppearance.single(materialState));
+        }
+
+        public StateEntry(int id, BlockState state, @Nullable BlockAppearance appearance) {
             this.id = id;
             this.state = state;
-            this.materialState = materialState;
+            this.appearance = appearance;
+            this.materialState = appearance == null ? null : appearance.primaryMaterial();
             //Override opacity of leaves to be solid
             if (state.getBlock() instanceof LeavesBlock) {
                 this.opacity = 15;
@@ -433,8 +443,24 @@ public class Mapper {
                 var serialized = new CompoundTag();
                 serialized.putInt("id", this.id);
                 serialized.put("block_state", BlockState.CODEC.encodeStart(NbtOps.INSTANCE, this.state).result().get());
-                if (this.materialState != null) {
-                    serialized.put("material_state", BlockState.CODEC.encodeStart(NbtOps.INSTANCE, this.materialState).result().get());
+                if (this.appearance != null && !this.appearance.isEmpty()) {
+                    var materials = new CompoundTag();
+                    for (var material : this.appearance.materials().entrySet()) {
+                        materials.put(material.getKey(), BlockState.CODEC.encodeStart(NbtOps.INSTANCE, material.getValue()).result().get());
+                    }
+                    serialized.put("appearance_materials", materials);
+                    // Keep the legacy field for older Voxy instances.  The
+                    // new reader still uses appearance_materials when present.
+                    if (this.appearance.materials().size() == 1 && this.appearance.primaryMaterial() != null) {
+                        serialized.put("material_state", BlockState.CODEC.encodeStart(NbtOps.INSTANCE, this.appearance.primaryMaterial()).result().get());
+                    }
+                    if (!this.appearance.connectedTextures().isEmpty()) {
+                        var connectedTextures = new CompoundTag();
+                        for (var ct : this.appearance.connectedTextures().entrySet()) {
+                            connectedTextures.putBoolean(ct.getKey(), ct.getValue());
+                        }
+                        serialized.put("appearance_ct", connectedTextures);
+                    }
                 }
                 var out = new ByteArrayOutputStream();
                 NbtIo.writeCompressed(serialized, out);
@@ -452,11 +478,31 @@ public class Mapper {
                 }
                 var bsc = compound.getCompound("block_state");
                 var state = BlockState.CODEC.parse(NbtOps.INSTANCE, bsc);
-                BlockState materialState = null;
-                if (compound.contains("material_state")) {
+                BlockAppearance appearance = null;
+                if (compound.contains("appearance_materials")) {
+                    var materials = new java.util.HashMap<String, BlockState>();
+                    var materialTag = compound.getCompound("appearance_materials");
+                    for (String key : materialTag.getAllKeys()) {
+                        var material = BlockState.CODEC.parse(NbtOps.INSTANCE, materialTag.getCompound(key));
+                        if (material.result().isPresent()) {
+                            materials.put(key, material.result().get());
+                        } else {
+                            forceResave[0] |= true;
+                        }
+                    }
+                    var connectedTextures = new java.util.HashMap<String, Boolean>();
+                    if (compound.contains("appearance_ct")) {
+                        var ctTag = compound.getCompound("appearance_ct");
+                        for (String key : ctTag.getAllKeys()) {
+                            connectedTextures.put(key, ctTag.getBoolean(key));
+                        }
+                    }
+                    appearance = BlockAppearance.of(materials, connectedTextures);
+                } else if (compound.contains("material_state")) {
+                    // Mappings written by Voxy before multi-state support.
                     var material = BlockState.CODEC.parse(NbtOps.INSTANCE, compound.getCompound("material_state"));
                     if (material.result().isPresent()) {
-                        materialState = material.result().get();
+                        appearance = BlockAppearance.single(material.result().get());
                     } else {
                         forceResave[0] |= true;
                     }
@@ -467,14 +513,14 @@ public class Mapper {
                     state = BlockState.CODEC.parse(NbtOps.INSTANCE, bsc);
                     if (state.isError()) {
                         Logger.error("Could not decode blockstate setting to air. id:" + id + " error: " + state.error().get().message());
-                        return new StateEntry(id, Blocks.AIR.defaultBlockState(), null);
+                        return new StateEntry(id, Blocks.AIR.defaultBlockState(), (BlockAppearance) null);
                     } else {
                         Logger.info("Fixed blockstate to: " + state.getOrThrow());
                         forceResave[0] |= true;
-                        return new StateEntry(id, state.getOrThrow(), materialState);
+                        return new StateEntry(id, state.getOrThrow(), appearance);
                     }
                 } else {
-                    return new StateEntry(id, state.getOrThrow(), materialState);
+                    return new StateEntry(id, state.getOrThrow(), appearance);
                 }
             } catch (IOException e) {
                 throw new RuntimeException(e);
